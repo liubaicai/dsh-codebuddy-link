@@ -114,6 +114,7 @@ export async function* runCodeBuddy(request) {
     const timer = setTimeout(() => { const error = new Error(`CodeBuddy request timed out after ${timeoutMs}ms`); error.name = 'TimeoutError'; fail(error); }, timeoutMs);
     request.signal?.addEventListener('abort', onAbort, { once: true });
     const exit = new Promise(resolveExit => {
+        child.once('spawn', () => { request.onSpawn?.(); });
         child.once('error', error => { failure ??= error; });
         child.once('close', (code, signal) => { closed = true; resolveExit({ code, signal }); });
     });

@@ -41,6 +41,10 @@ interface Config {
   hiddenModels: string[];
   defaultModel: string;
   tools: string;
+  reasoningEffort: string;
+  maxConcurrency: number;
+  queueTimeoutMs: number;
+  stallWarnMs: number;
 }
 interface Account {
   status: 'ok' | 'unavailable' | 'auth-required' | 'error';
@@ -52,7 +56,29 @@ interface Account {
   updatedAt?: string;
   source?: string;
 }
+interface RunSnapshot {
+  id: string;
+  source: 'model' | 'ask';
+  state: 'queued' | 'starting' | 'waiting' | 'responding' | 'completed' | 'failed' | 'cancelled';
+  requestedModel: string;
+  returnedModel?: string;
+  requestedEffort: string;
+  contextWindow?: number;
+  contextSource?: 'model' | 'fallback';
+  contextOverrideSent: false;
+  reasoningConfirmed: false;
+  queuedAt: number;
+  startedAt?: number;
+  lastProgressAt?: number;
+  endedAt?: number;
+  warning: boolean;
+  queuePosition: number;
+  totalCredits?: number;
+  totalCostUsd?: number;
+  failure?: 'timeout' | 'queue-timeout' | 'aborted' | 'error';
+}
 interface Status {
+  runs: RunSnapshot[];
   config: Config;
   account: Account;
   catalogModels: { id: string; name: string }[];
@@ -62,7 +88,10 @@ interface Status {
 interface AuthFlow { flowId: string; verificationUri: string | null; expiresIn: number }
 type AuthAction = 'import' | 'clear' | 'start' | 'poll' | 'cancel';
 const modes: PermissionMode[] = ['dontAsk', 'plan', 'acceptEdits'];
-const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object';
+// The classic-script entry cannot import server modules.
+const efforts = ['auto', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
+const bounded = (value: unknown, min: number, max: number): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= min && value <= max;
+const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value);
 const strings = (value: unknown): value is string[] => Array.isArray(value) && value.every(item => typeof item === 'string');
 
 function parseStatus(value: unknown): Status {
@@ -72,7 +101,51 @@ function parseStatus(value: unknown): Status {
     || typeof c.defaultModel !== 'string' || typeof c.tools !== 'string' || !Array.isArray(value.catalogModels)
     || !value.catalogModels.every(model => isRecord(model) && typeof model.id === 'string' && typeof model.name === 'string')
     || !['ok', 'unavailable', 'auth-required', 'error'].includes(String(value.account.status))) throw new Error('服务端状态格式无效');
-  return { ...value, auth: { configured: isRecord(value.auth) && value.auth.configured === true } } as unknown as Status;
+  const reasoningEffort = c.reasoningEffort ?? 'auto';
+  const maxConcurrency = c.maxConcurrency ?? 2;
+  const queueTimeoutMs = c.queueTimeoutMs ?? 600000;
+  const stallWarnMs = c.stallWarnMs ?? 90000;
+  if (typeof reasoningEffort !== 'string' || !efforts.includes(reasoningEffort) || !bounded(maxConcurrency, 1, 16)
+    || !bounded(queueTimeoutMs, 1, 2147483647) || !bounded(stallWarnMs, 0, 2147483647)) throw new Error('服务端状态格式无效');
+  return { config: { enabled:c.enabled, permissionMode:c.permissionMode, models:c.models, hiddenModels:c.hiddenModels,
+    defaultModel:c.defaultModel, tools:c.tools, reasoningEffort, maxConcurrency, queueTimeoutMs, stallWarnMs },
+    account: value.account as unknown as Account,
+    catalogModels: value.catalogModels.map(model => ({id:model.id as string, name:model.name as string})),
+    modelMessage: typeof value.modelMessage === 'string' ? value.modelMessage : undefined,
+    auth: { configured: isRecord(value.auth) && value.auth.configured === true }, runs: parseRuns(value.runs) };
+}
+
+// Kept local because the classic browser entry cannot import server modules.
+function isModelIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.exec(value)?.[0] === value
+    && !value.includes(':/') && value.split('/').every(part => part !== '' && part !== '.' && part !== '..');
+}
+function parseRuns(value: unknown): RunSnapshot[] {
+  if (!Array.isArray(value)) return [];
+  const nonterminal: RunSnapshot[] = [];
+  const terminal: RunSnapshot[] = [];
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.id !== 'string' || !['model', 'ask'].includes(String(entry.source))
+      || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(entry.state))
+      || typeof entry.requestedModel !== 'string' || typeof entry.requestedEffort !== 'string'
+      || !bounded(entry.queuedAt, 0, Number.MAX_SAFE_INTEGER)) continue;
+    const run: RunSnapshot = {id:entry.id, source:entry.source as RunSnapshot['source'], state:entry.state as RunSnapshot['state'],
+      requestedModel:isModelIdentifier(entry.requestedModel) ? entry.requestedModel : 'unknown', requestedEffort:efforts.includes(entry.requestedEffort) ? entry.requestedEffort : 'auto', queuedAt:entry.queuedAt,
+      contextOverrideSent:false, reasoningConfirmed:false, warning:entry.warning === true,
+      queuePosition:bounded(entry.queuePosition, 0, Number.MAX_SAFE_INTEGER) ? entry.queuePosition : 0};
+    if (isModelIdentifier(entry.returnedModel)) run.returnedModel = entry.returnedModel;
+    if (entry.contextSource === 'model' || entry.contextSource === 'fallback') run.contextSource = entry.contextSource;
+    for (const key of ['contextWindow', 'startedAt', 'lastProgressAt', 'endedAt', 'totalCredits', 'totalCostUsd'] as const) {
+      if (typeof entry[key] === 'number' && Number.isFinite(entry[key]) && entry[key] >= 0) run[key] = entry[key];
+    }
+    if (['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(entry.failure))) run.failure = entry.failure as RunSnapshot['failure'];
+    // Mirror the server cap without letting newer terminal history hide live calls.
+    if (['completed', 'failed', 'cancelled'].includes(run.state)) {
+      if (terminal.length < 50) terminal.push(run);
+    } else if (nonterminal.length < 80) nonterminal.push(run);
+    if (nonterminal.length === 80 && terminal.length === 50) break;
+  }
+  return [...nonterminal, ...terminal];
 }
 
 function officialVerificationUri(value: unknown): string | null {
@@ -135,6 +208,22 @@ const field = { display: 'flex', flexDirection: 'column', gap: '6px', marginBott
 const text = (value: unknown): string => typeof value === 'string' && value.trim() ? value : '未知';
 const amount = (value: unknown): string => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '未知';
 
+function renderRun(run: RunSnapshot): unknown {
+  const labels: Record<RunSnapshot['state'], string> = {queued:'排队中', starting:'启动中', waiting:'等待响应', responding:'响应中', completed:'已完成', failed:'失败', cancelled:'已取消'};
+  const failures = {'timeout':'执行超时', 'queue-timeout':'排队超时', 'aborted':'已中止', 'error':'执行失败'};
+  const time = (value: number | undefined) => value === undefined ? '未知' : new Date(value).toLocaleTimeString();
+  return h('article', { key:run.id, style:{borderTop:'0.5px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35))', padding:'10px 0', overflowWrap:'anywhere'} },
+    h('div', {style:row}, h('strong', null, labels[run.state]), h('span', null, run.source === 'model' ? '模型调用' : '独立委派'),
+      run.state === 'queued' ? h('span', null, `队列位置：${run.queuePosition}`) : null),
+    h('p', null, `请求模型：${text(run.requestedModel)}；返回模型：${text(run.returnedModel)}`),
+    h('p', null, `请求推理强度：${text(run.requestedEffort)}（服务端未确认）`),
+    h('p', null, `DSH 上下文预算：${run.contextWindow ?? '未知'}；来源：${run.contextSource === 'model' ? '模型元数据' : run.contextSource === 'fallback' ? '回退配置' : '未知'}；未向 CLI 覆盖上下文限制`),
+    h('p', null, `积分：${amount(run.totalCredits)}；费用（USD）：${amount(run.totalCostUsd)}`),
+    h('p', null, `入队：${time(run.queuedAt)}；开始：${time(run.startedAt)}；进展：${time(run.lastProgressAt)}；结束：${time(run.endedAt)}`),
+    run.warning ? h('p', {role:'status'}, '长时间无进展，仍在等待；这不代表调用失败。') : null,
+    run.failure ? h('p', null, failures[run.failure]) : null);
+}
+
 function SettingsPanel(): unknown {
   const [status, setStatus] = useState<Status | null>(null);
   const [draft, setDraft] = useState<Config | null>(null);
@@ -154,7 +243,7 @@ function SettingsPanel(): unknown {
   const authSequence = useRef(0);
 
   async function authenticate(action: AuthAction): Promise<void> {
-    if (authPending.current || pending.current || !status) return;
+    if (!active.current || authPending.current || pending.current || !status) return;
     if ((action === 'poll' || action === 'cancel') && !authFlow) return;
     authPending.current = true;
     const ticket = ++authSequence.current;
@@ -194,25 +283,29 @@ function SettingsPanel(): unknown {
     }
   }
 
-  async function load(action: 'status' | 'refresh' | 'config' | 'models', config?: Config): Promise<void> {
-    if (pending.current || authPending.current) return;
+  async function load(action: 'status' | 'refresh' | 'config' | 'models', config?: Config, automatic = false): Promise<void> {
+    if (!active.current || pending.current || authPending.current) return;
     pending.current = true;
     const ticket = ++sequence.current;
-    setBusy(action === 'config' ? '保存中' : action === 'refresh' ? '刷新中' : '加载中');
-    setError('');
-    setNotice('');
+    if (!automatic) {
+      setBusy(action === 'config' ? '保存中' : action === 'refresh' ? '刷新中' : '加载中');
+      setError('');
+      setNotice('');
+    }
     try {
       const result = await request(action, action === 'status' ? undefined : (action === 'refresh' || action === 'models') ? {} : {
         permissionMode: config!.permissionMode, models: config!.models, hiddenModels: config!.hiddenModels,
-        defaultModel: config!.defaultModel, tools: config!.tools,
+        defaultModel: config!.defaultModel, tools: config!.tools, reasoningEffort: config!.reasoningEffort,
+        maxConcurrency: config!.maxConcurrency, queueTimeoutMs: config!.queueTimeoutMs, stallWarnMs: config!.stallWarnMs,
       });
       if (!active.current || ticket !== sequence.current) return;
       setStatus(result);
       // Refreshing account information must not discard unsaved form edits.
-      if (action === 'status' || action === 'config') setDraft(result.config);
-      setNotice(action === 'config' ? '设置已保存' : action === 'refresh' ? '账户状态已刷新' : '');
+      if (action === 'config') setDraft(result.config);
+      else if (action === 'status') setDraft(previous => previous ?? result.config);
+      if (!automatic) setNotice(action === 'config' ? '设置已保存' : action === 'refresh' ? '账户状态已刷新' : '');
     } catch (cause) {
-      if (active.current && ticket === sequence.current) setError(cause instanceof Error ? cause.message : '请求失败，请重试');
+      if (!automatic && active.current && ticket === sequence.current) setError(cause instanceof Error ? cause.message : '请求失败，请重试');
     } finally {
       if (ticket === sequence.current) {
         pending.current = false;
@@ -224,7 +317,8 @@ function SettingsPanel(): unknown {
   useEffect(() => {
     active.current = true;
     void load('status');
-    return () => { active.current = false; ++sequence.current; ++authSequence.current; pending.current = false; authPending.current = false; };
+    const timer = setInterval(() => { void load('status', undefined, true); }, 2000);
+    return () => { clearInterval(timer); active.current = false; ++sequence.current; ++authSequence.current; pending.current = false; authPending.current = false; };
   }, []);
 
   const update = (patch: Partial<Config>) => { setDraft(previous => previous ? { ...previous, ...patch } : previous); setNotice(''); };
@@ -236,6 +330,8 @@ function SettingsPanel(): unknown {
   const enabledModels = [...models.keys()].filter(id => draft?.models.includes(id) && !draft.hiddenModels.includes(id));
   const validDefault = !!draft?.defaultModel && enabledModels.includes(draft.defaultModel);
   const validMode = !!draft && modes.includes(draft.permissionMode as PermissionMode);
+  const validRuntime = !!draft && efforts.includes(draft.reasoningEffort) && bounded(draft.maxConcurrency, 1, 16)
+    && bounded(draft.queueTimeoutMs, 1, 2147483647) && bounded(draft.stallWarnMs, 0, 2147483647);
   const account = status?.account;
   const accountLabels = { ok: '可用', unavailable: '暂不可用', 'auth-required': '需要登录', error: '查询失败' };
   return h('section', { 'aria-label': 'CodeBuddy 设置', style: { maxWidth: '760px', width: '100%', boxSizing: 'border-box', padding: '20px', fontSize: '13px', lineHeight: 1.5, color: 'var(--dsw-alias-label-primary, inherit)' } },
@@ -281,6 +377,11 @@ function SettingsPanel(): unknown {
       h('p', null, `单位：${text(account?.unit)}；更新时间：${text(account?.updatedAt)}`),
       h('p', null, `来源：${text(account?.source)}`),
       h('p', null, '是否与 WorkBuddy 共享账户或积分，以接口返回为准。缺失字段显示“未知”，不推算余额。仅点击刷新账户时主动查询，不自动轮询。')),
+    h('section', {style:box, 'aria-label':'运行记录'},
+      h('h3', null, '运行记录'),
+      h('p', null, '仅当前进程内存，优先显示未结束调用（最多 80 条），另保留最近 50 条已结束记录，合计最多 130 条；此面板打开时每 2 秒刷新。不会保存提示词、原始输出或错误详情。'),
+      h('div', {style:{maxHeight:'420px', overflowY:'auto'}},
+        ...(status?.runs.length ? status.runs.map(renderRun) : [h('p', null, '暂无运行记录')]))),
     draft ? h('fieldset', { disabled: !!busy, style: { ...box, minWidth: 0 } },
       h('legend', null, '模型与独立委派设置'),
       h('label', { style: field }, '权限模式',
@@ -314,11 +415,23 @@ function SettingsPanel(): unknown {
         setCustomModel('');
       } }, '添加并启用模型')),
       h('p', null, '勾选项用于显示模型；自定义 ID 的可用性由 CodeBuddy 服务端决定。'),
+      h('label', {style:field}, '默认推理强度', h('select', {value:draft.reasoningEffort,
+        onChange:(event:{target:{value:string}}) => update({reasoningEffort:event.target.value})},
+        ...efforts.map(effort => h('option', {key:effort, value:effort}, effort)))),
+      h('p', null, 'auto 不发送推理强度参数；其他值仅表示请求，不代表服务端已确认。'),
+      ...([
+        ['maxConcurrency', '最大并发数', 1, 16],
+        ['queueTimeoutMs', '排队等待上限（毫秒）', 1, 2147483647],
+        ['stallWarnMs', '无进展提醒（毫秒，0 关闭）', 0, 2147483647],
+      ] as const).map(([key, label, min, max]) => h('label', {key, style:field}, label,
+        h('input', {type:'number', min, max, step:1, value:Number.isNaN(draft[key]) ? '' : draft[key],
+          onChange:(event:{target:{value:string}}) => update({[key]:event.target.value.trim() === '' ? NaN : Number(event.target.value)})}))),
       h('p', { role: 'note', style: { color: 'var(--dsw-alias-label-primary, inherit)', background: 'var(--dsw-alias-bg-layer-1, transparent)', border: '0.5px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35))', padding: '12px', borderRadius: '6px' } }, '警告：独立委派工具启用后不受DSH文件沙箱约束，默认留空。'),
       h('label', { style: field }, '独立委派工具配置（tools）', h('input', { type: 'text', value: draft.tools,
         onChange: (event: { target: { value: string } }) => update({ tools: event.target.value }) })),
       !validDefault || !validMode ? h('p', { role: 'alert' }, '请选择有效的权限模式与已启用的默认模型。') : null,
-      h('button', { type: 'button', disabled: !!busy || authBusy || !validDefault || !validMode, onClick: () => void load('config', draft) }, '保存设置')) : null);
+      !validRuntime ? h('p', {role:'alert'}, '请检查推理强度、并发数与等待时间范围；时间必须为整数。') : null,
+      h('button', { type: 'button', disabled: !!busy || authBusy || !validDefault || !validMode || !validRuntime, onClick: () => void load('config', draft) }, '保存设置')) : null);
 }
 
 export function apply(ctx: ClientContext): void {

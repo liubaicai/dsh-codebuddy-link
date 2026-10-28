@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.16
+
+- Add in-memory, metadata-only call diagnostics: requested/returned model, requested effort, declared DSH context budget and source, CLI-reported credits/USD cost, timestamps and terminal categories. Unknown values remain unknown; context override and confirmed server reasoning are never claimed. Restrict model identifiers and keep prompts, responses, credentials, raw errors and paths out of run snapshots.
+- Unify provider and `codebuddy_ask` effort precedence with a persisted `reasoningEffort` default and per-call override. Explicit `auto` omits `--effort`; invalid values fail rather than silently falling back.
+- Share a bounded process-local FIFO between both entrypoints: configurable concurrency (default 2), separate queue deadline, queued cancellation without spawn, and slot release after CLI cleanup. Live concurrency increases wake queued calls without killing existing processes on decreases.
+- Add waiting/responding states and configurable no-progress warnings, plus settings-page local status polling that preserves edits and does not poll external credits/OAuth. Preserve active calls plus 50 terminal records; provide `/codebuddy runs`. No automatic retries, model switching, privilege expansion, persistent CLI sessions or diagnostic log files.
+- Add protocol, runtime, HTTP/client and actual fake-CLI entrypoint integration regressions covering effort arguments, queue sharing, cancellation, execution timeout, live settings, metadata privacy and active-record retention.
+
 ## 0.3.15
 
 - Prepare public GitHub distribution with committed build artifacts, HTTPS Git/tag installation instructions, repository metadata, and a dependency-free prepack verification step. Git installations work without lifecycle scripts or TypeScript build dependencies.

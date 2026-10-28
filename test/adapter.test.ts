@@ -116,9 +116,13 @@ test('resolveModel exposes 思考等级 efforts and stream forwards only valid e
   const runner: Runner = async function* (request) { seen.push(request.effort); yield {type:'result',text:'ok'} }
   const adapter = new CodeBuddyAdapter(cfg, runner)
   await collect(adapter.stream({...options, model:'hy3', reasoningEffort: 'high' as ReasoningEffortId}))
-  await collect(adapter.stream({...options, model:'hy3', reasoningEffort: 'mega' as unknown as ReasoningEffortId}))
+  const invalid = await collect(adapter.stream({...options, model:'hy3', reasoningEffort: 'mega' as unknown as ReasoningEffortId}))
+  assert.ok(invalid.some(event => event.type === 'finish' && event.reason.kind === 'error'))
   await collect(adapter.stream({...options, model:'hy3'}))
-  assert.deepEqual(seen, ['high', undefined, undefined])
+  cfg.reasoningEffort = 'max'
+  await collect(adapter.stream({...options, model:'hy3'}))
+  await collect(adapter.stream({...options, model:'hy3', reasoningEffort: 'auto' as ReasoningEffortId}))
+  assert.deepEqual(seen, ['high', undefined, 'max', undefined])
 })
 
 test('resolveModel reports per-model context windows with config fallback', async () => {

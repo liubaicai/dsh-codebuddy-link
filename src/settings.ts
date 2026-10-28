@@ -4,7 +4,8 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { resolveConfig, type PluginConfig } from './config.ts'
 
-const editable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'tools', 'modelContext'])
+const editable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'tools', 'modelContext',
+  'reasoningEffort', 'maxConcurrency', 'queueTimeoutMs', 'stallWarnMs'])
 export function settingsPath(): string {
   return join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'plugins', 'dsh-codebuddy-link', 'settings.json')
 }

@@ -1,3 +1,9 @@
+export const CODEBUDDY_EFFORTS = ['auto', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode'] as const
+export type CodeBuddyEffort = typeof CODEBUDDY_EFFORTS[number]
+export function isCodeBuddyEffort(value: unknown): value is CodeBuddyEffort {
+  return typeof value === 'string' && (CODEBUDDY_EFFORTS as readonly string[]).includes(value)
+}
+
 export interface PluginConfig {
   enabled: boolean
   codebuddyBin: string
@@ -8,6 +14,10 @@ export interface PluginConfig {
   permissionMode: 'dontAsk' | 'plan' | 'acceptEdits'
   tools: string
   timeoutMs: number
+  reasoningEffort: string
+  maxConcurrency: number
+  queueTimeoutMs: number
+  stallWarnMs: number
   contextWindow: number
   /** Per-model context windows (models.dev) persisted by model discovery. */
   modelContext: Record<string, number>
@@ -33,6 +43,14 @@ export function resolveConfig(entry: Record<string, unknown> = {}, env = process
     if (!Number.isSafeInteger(v) || v <= 0) throw new Error(`${key} must be a positive integer`)
     return v
   }
+  const boundedInteger = (key: string, variable: string, fallback: number, min: number, max: number) => {
+    const raw = value(key, variable, fallback)
+    const v = typeof raw === 'number' || (typeof raw === 'string' && raw.trim() !== '') ? Number(raw) : NaN
+    if (!Number.isSafeInteger(v) || v < min || v > max) throw new Error(`${key} must be an integer from ${min} to ${max}`)
+    return v
+  }
+  const reasoningEffort = string('reasoningEffort', 'DSH_CODEBUDDY_REASONING_EFFORT', 'auto')
+  if (!isCodeBuddyEffort(reasoningEffort)) throw new Error(`reasoningEffort must be ${CODEBUDDY_EFFORTS.join(', ')}`)
   const mode = string('permissionMode', 'DSH_CODEBUDDY_MODE', 'dontAsk')
   if (mode !== 'dontAsk' && mode !== 'plan' && mode !== 'acceptEdits') throw new Error('permissionMode must be dontAsk, plan or acceptEdits')
   const model = string('defaultModel', 'DSH_CODEBUDDY_DEFAULT_MODEL', 'default') || 'default'
@@ -64,6 +82,10 @@ export function resolveConfig(entry: Record<string, unknown> = {}, env = process
     workspaceRoot: string('workspaceRoot', 'DSH_CODEBUDDY_WORKSPACE_ROOT'),
     permissionMode: mode, tools: string('tools', 'DSH_CODEBUDDY_TOOLS'),
     timeoutMs: number('timeoutMs', 'DSH_CODEBUDDY_TIMEOUT_MS', 600000),
+    reasoningEffort,
+    maxConcurrency: boundedInteger('maxConcurrency', 'DSH_CODEBUDDY_MAX_CONCURRENCY', 2, 1, 16),
+    queueTimeoutMs: boundedInteger('queueTimeoutMs', 'DSH_CODEBUDDY_QUEUE_TIMEOUT_MS', 600000, 1, 2147483647),
+    stallWarnMs: boundedInteger('stallWarnMs', 'DSH_CODEBUDDY_STALL_WARN_MS', 90000, 0, 2147483647),
     contextWindow: number('contextWindow', 'DSH_CODEBUDDY_CONTEXT_WINDOW', 128000),
     modelContext,
     maxPromptChars: number('maxPromptChars', 'DSH_CODEBUDDY_MAX_PROMPT_CHARS', 1000000),

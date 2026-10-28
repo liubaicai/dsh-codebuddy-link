@@ -1,4 +1,6 @@
-export function registerSettingsRoutes(server, store, notify, refreshAccount = async () => ({ status: 'unavailable', message: '账户积分接口尚不可用；请在 CodeBuddy / WorkBuddy 客户端查看。' }), auth, refreshModels) {
+import { isModelIdentifier } from "./metadata.js";
+import { isCodeBuddyEffort } from "./config.js";
+export function registerSettingsRoutes(server, store, notify, refreshAccount = async () => ({ status: 'unavailable', message: '账户积分接口尚不可用；请在 CodeBuddy / WorkBuddy 客户端查看。' }), auth, refreshModels, readRuns = () => []) {
     let account = { status: 'unavailable', message: '点击刷新查询账户积分。' };
     let pending;
     let generation = 0;
@@ -10,7 +12,10 @@ export function registerSettingsRoutes(server, store, notify, refreshAccount = a
         modelMessage,
         auth: auth ? await auth.status() : { configured: false },
         config: { enabled: store.config.enabled, permissionMode: store.config.permissionMode, models: store.config.models,
-            hiddenModels: store.config.hiddenModels, defaultModel: store.config.defaultModel, tools: store.config.tools },
+            hiddenModels: store.config.hiddenModels, defaultModel: store.config.defaultModel, tools: store.config.tools,
+            reasoningEffort: store.config.reasoningEffort, maxConcurrency: store.config.maxConcurrency,
+            queueTimeoutMs: store.config.queueTimeoutMs, stallWarnMs: store.config.stallWarnMs },
+        runs: publicRuns(readRuns()),
         account, catalogModels: [...new Map([...catalog, ...store.config.models.filter(id => !catalog.some(m => m.id === id)).map(id => ({ id, name: id === 'default' ? 'CodeBuddy CLI 默认模型' : id }))].map(m => [m.id, m])).values()],
     });
     const disposers = [];
@@ -114,6 +119,47 @@ export function registerSettingsRoutes(server, store, notify, refreshAccount = a
     }
     return () => { generation++; auth?.cancelAll(); for (const dispose of disposers.reverse())
         dispose(); };
+}
+// A runtime snapshot is deliberately a metadata-only boundary, never a raw runner object.
+function publicRuns(values) {
+    if (!Array.isArray(values))
+        return [];
+    const nonterminal = [];
+    const terminal = [];
+    for (const value of values) {
+        if (!value || typeof value !== 'object' || Array.isArray(value))
+            continue;
+        const run = value;
+        if (typeof run.id !== 'string' || !['model', 'ask'].includes(String(run.source))
+            || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(run.state))
+            || typeof run.requestedModel !== 'string' || typeof run.requestedEffort !== 'string'
+            || typeof run.queuedAt !== 'number' || !Number.isFinite(run.queuedAt))
+            continue;
+        const clean = { id: run.id, source: run.source, state: run.state,
+            requestedModel: isModelIdentifier(run.requestedModel) ? run.requestedModel : 'unknown', requestedEffort: isCodeBuddyEffort(run.requestedEffort) ? run.requestedEffort : 'auto', queuedAt: run.queuedAt,
+            contextOverrideSent: false, reasoningConfirmed: false, warning: run.warning === true,
+            queuePosition: Number.isSafeInteger(run.queuePosition) && Number(run.queuePosition) >= 0 ? run.queuePosition : 0 };
+        if (isModelIdentifier(run.returnedModel))
+            clean.returnedModel = run.returnedModel;
+        if (run.contextSource === 'model' || run.contextSource === 'fallback')
+            clean.contextSource = run.contextSource;
+        for (const key of ['contextWindow', 'startedAt', 'lastProgressAt', 'endedAt', 'totalCredits', 'totalCostUsd']) {
+            if (typeof run[key] === 'number' && Number.isFinite(run[key]) && run[key] >= 0)
+                clean[key] = run[key];
+        }
+        if (['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(run.failure)))
+            clean.failure = run.failure;
+        // Snapshots arrive newest first; terminal history must never crowd out live calls.
+        if (['completed', 'failed', 'cancelled'].includes(String(clean.state))) {
+            if (terminal.length < 50)
+                terminal.push(clean);
+        }
+        else if (nonterminal.length < 80)
+            nonterminal.push(clean);
+        if (nonterminal.length === 80 && terminal.length === 50)
+            break;
+    }
+    return [...nonterminal, ...terminal];
 }
 function sameHost(origin, host) {
     try {

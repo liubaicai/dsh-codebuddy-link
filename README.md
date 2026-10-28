@@ -7,7 +7,8 @@
 - **模型提供方**：在 DSH 中选择 `codebuddy/default`，优先使用插件保存的授权，否则回退到本机 CodeBuddy CLI 登录态。
 - **DSH 工具调用**：模型通过结构化响应申请 DSH 工具，由 DSH 执行；不会把 DSH 的文件权限边界替换为 CodeBuddy 内置工具。
 - **独立委派**：`codebuddy_ask` 接收一个独立问题，不自动发送 DSH 历史。
-- `/codebuddy status`、`/codebuddy models`、`/codebuddy help`。
+- `/codebuddy status`、`/codebuddy models`、`/codebuddy runs`、`/codebuddy help`。
+- 主模型与独立委派共享思考强度默认值、进程内 FIFO 并发队列；设置页提供脱敏调用诊断和无进展提醒。
 - 文本与思考流、usage、取消、超时、Windows npm 启动器及进程树回收。
 
 ## 安装
@@ -27,7 +28,7 @@ npm install -g @tencent-ai/codebuddy-code
 需要本机安装 Git。公开仓库使用 HTTPS，不要求 SSH 密钥。将 `web` 替换成实际使用的 DSH profile：
 
 ```sh
-dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.15"
+dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.16"
 ```
 
 仓库**包含已构建的 dist**，安装不依赖 TypeScript、开发依赖或安装时构建脚本。CI 会重新构建并检查提交的产物，避免源码与产物不一致。
@@ -43,10 +44,10 @@ dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-lin
 从 [Releases](https://github.com/liubaicai/dsh-codebuddy-link/releases) 下载对应版本 `.tgz`，可使用同页 `SHA256SUMS.txt` 核对 SHA-256。进入下载目录后执行：
 
 ```powershell
-dsh plugin --profile web add .\dsh-codebuddy-link-0.3.15.tgz
+dsh plugin --profile web add .\dsh-codebuddy-link-0.3.16.tgz
 ```
 
-macOS/Linux 使用 `./dsh-codebuddy-link-0.3.15.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
+macOS/Linux 使用 `./dsh-codebuddy-link-0.3.16.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
 
 ### 4. 启用与升级
 
@@ -92,7 +93,7 @@ GitHub 安装或 Actions 不会读取你的 CodeBuddy 凭据；模型请求只�
 
 ## 配置
 
-Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 > 插件 config > 环境变量 > 默认值**。面板只允许覆盖模型、权限模式和委派 tools；CLI 路径等仍由插件配置控制。
+Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 > 插件 config > 环境变量 > 默认值**。面板允许覆盖模型、权限模式、委派 tools、思考强度、并发数、排队超时和无进展提醒阈值；CLI 路径等仍由插件配置控制。
 
 | config | 环境变量 | 默认值 / 说明 |
 | --- | --- | --- |
@@ -102,7 +103,11 @@ Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 
 | `models` | `DSH_CODEBUDDY_MODELS` | 数组 / 逗号分隔模型 ID；始终包含 `default` |
 | `hiddenModels` | `DSH_CODEBUDDY_HIDDEN_MODELS` | 隐藏并禁止调用的模型 ID 数组 / 逗号分隔列表 |
 | `workspaceRoot` | `DSH_CODEBUDDY_WORKSPACE_ROOT` | 当前 DSH session 工作目录；不可用时 provider 使用进程工作目录 |
-| `timeoutMs` | `DSH_CODEBUDDY_TIMEOUT_MS` | `600000` |
+| `timeoutMs` | `DSH_CODEBUDDY_TIMEOUT_MS` | `600000`；获得并发槽位后启动 CLI 的执行预算，不含排队时间 |
+| `reasoningEffort` | `DSH_CODEBUDDY_REASONING_EFFORT` | `auto`；主模型与独立委派共享默认值，允许 `auto/minimal/low/medium/high/xhigh/max/ultracode` |
+| `maxConcurrency` | `DSH_CODEBUDDY_MAX_CONCURRENCY` | `2`；整数 1–16，当前插件实例内共享并发槽位 |
+| `queueTimeoutMs` | `DSH_CODEBUDDY_QUEUE_TIMEOUT_MS` | `600000`；整数 1–2147483647，排队预算 |
+| `stallWarnMs` | `DSH_CODEBUDDY_STALL_WARN_MS` | `90000`；整数 0–2147483647，0 关闭无进展提醒 |
 | `contextWindow` | `DSH_CODEBUDDY_CONTEXT_WINDOW` | `128000`，未发现窗口信息模型的回退值 |
 | `modelContext` | `DSH_CODEBUDDY_MODEL_CONTEXT` | 每个模型的上下文窗口（模型发现时从 models.dev 获取并保存），如 `{"hy3": 262144}` |
 | `maxPromptChars` | `DSH_CODEBUDDY_MAX_PROMPT_CHARS` | `1000000`；超限报错，不静默截断 |
@@ -123,6 +128,18 @@ Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 
 ```
 
 `models` 是已启用列表；设置页可发现候选并保存选择。发现结果不会自动启用，也不会改变 CLI 登录区域或授予跨区调用权限。不要将其他服务的模型名直接当作 CodeBuddy ID。
+
+## 思考强度、调用诊断与排队（0.3.16）
+
+思考强度优先级：**本次调用显式值 > 面板/插件默认值 > `auto`**。会话模型的思考等级与 `codebuddy_ask` 的 `reasoningEffort` 参数遵循同一规则；显式 `auto` 不传 `--effort`，不会继承默认的 `high` 等值。无效值直接报错，不静默回退。CLI/具体模型是否支持、是否实际采用该等级仍由上游决定；不保证最大思考或最大上下文。
+
+设置页“调用诊断”和 `/codebuddy runs` 区分请求模型、CLI 返回模型（缺失为未知）、请求思考强度、DSH 声明的上下文预算及来源。**上下文预算不是 CLI 上下文覆盖；服务端实际推理强度未确认。** 仅当 CLI 返回有效的 `total_credits` / `total_cost_usd` 时显示积分/美元费用；缺失为未知，真实 0 保留，不按 token 或价格表推算。
+
+队列覆盖主模型和独立委派，先进先出，最多 64 个等待请求；队列满、排队超时、执行超时和取消不会自动重试或切换模型。排队取消不启动 CLI，执行取消/超时回收进程树后才释放槽位。队列只在当前插件实例生效，不提供跨 DSH 进程/多实例的全局限流。调高并发数立即唤醒队列，调低不杀死已有进程；思考强度和排队预算修改只影响新调用，已有请求保留原预算。独立委派的宿主总时限为执行预算 + 排队预算 + 5 秒，最多 2147483647 毫秒；宿主自身更短的截止时间仍可能提前取消。
+
+状态包括排队、启动、等待响应、响应中、完成、失败、取消。无进展时间只由正文/思考/工具事件更新，初始化元数据不算进展；提醒只是“仍在等待”，不是失败，不触发重试。提醒阈值对现有记录立即生效。面板挂载期间每 2 秒读取本机状态，不自动查询账户积分或 OAuth，不覆盖未保存设置。
+
+诊断仅存在进程内存，保留全部活动/等待请求和最近 50 条终态记录，重启清空；面板优先显示活动记录，最多 130 条。仅保留白名单元数据，不记录提示词、回复、工作目录、原始 CLI 事件、凭据或原始错误文本。模型标识限制长度/字符并拒绝 URL、绝对路径及遍历片段；这不是能识别伪装成合法模型 ID 的任意秘密的检测器。原有 `/codebuddy status` 仍展示管理员配置（含 CLI/工作目录），分享时请自行检查。
 
 ## 工作方式与权限边界
 
@@ -160,7 +177,7 @@ CLI 会自行加载其用户配置、工作目录规则等；插件并非隔离�
 
 单独的 JSON 协议围栏按协议回复处理；讲解/示例必须放在 text 字段或自然语言说明中。以 JSON 开头却混入尾随说明的输出仍会失败，避免误执行有效前缀。仅收录明确格式，不承诺未来未知序列化或新供应商字段自动兼容；格式测试不等于每个上游服务的在线验证。
 
-- CLI 计费/额度以 CodeBuddy 为准；插件只转发 token usage，不估算费用。
+- CLI 计费/额度以 CodeBuddy 为准；插件转发 token usage，诊断仅显示 CLI 明确返回的积分/费用，不估算费用。
 - `/codebuddy status` 只显示配置，不证明登录成功。
 - Windows npm shim 会解析到真实 JS 并以 Node 执行，不把用户输入交给 shell。自定义 shell wrapper 不受支持，应指定真实可执行文件或 CLI JS。
 

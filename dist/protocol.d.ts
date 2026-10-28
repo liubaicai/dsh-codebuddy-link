@@ -8,6 +8,11 @@ export type BridgeEvent = {
     cacheRead: number;
     cacheWrite: number;
 } | {
+    type: 'metadata';
+    model?: string;
+    totalCredits?: number;
+    totalCostUsd?: number;
+} | {
     type: 'tool-start';
     id: string;
     name: string;
@@ -59,6 +64,7 @@ export declare class CodeBuddyProtocol {
     private rejectEchoedHttpError;
     private delta;
     private startTool;
+    private emitMetadata;
     private parseUsage;
     private updateUsage;
     private emitUsage;

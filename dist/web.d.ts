@@ -35,4 +35,4 @@ export declare function registerSettingsRoutes(server: WebServerLike, store: Set
         contextWindow?: number;
     }[];
     message?: string;
-}>): () => void;
+}>, readRuns?: () => unknown[]): () => void;

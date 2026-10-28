@@ -1,3 +1,6 @@
+export declare const CODEBUDDY_EFFORTS: readonly ["auto", "minimal", "low", "medium", "high", "xhigh", "max", "ultracode"];
+export type CodeBuddyEffort = typeof CODEBUDDY_EFFORTS[number];
+export declare function isCodeBuddyEffort(value: unknown): value is CodeBuddyEffort;
 export interface PluginConfig {
     enabled: boolean;
     codebuddyBin: string;
@@ -8,6 +11,10 @@ export interface PluginConfig {
     permissionMode: 'dontAsk' | 'plan' | 'acceptEdits';
     tools: string;
     timeoutMs: number;
+    reasoningEffort: string;
+    maxConcurrency: number;
+    queueTimeoutMs: number;
+    stallWarnMs: number;
     contextWindow: number;
     /** Per-model context windows (models.dev) persisted by model discovery. */
     modelContext: Record<string, number>;

@@ -6,6 +6,8 @@ export interface CodeBuddyRequest {
     cwd: string;
     model?: string;
     effort?: string;
+    /** Internal lifecycle notification; never passed to the CLI. */
+    onSpawn?: () => void;
     permissionMode?: 'dontAsk' | 'plan' | 'acceptEdits';
     tools?: string;
     bin?: string;

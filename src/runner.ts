@@ -12,6 +12,8 @@ export interface CodeBuddyRequest {
   cwd: string;
   model?: string;
   effort?: string;
+  /** Internal lifecycle notification; never passed to the CLI. */
+  onSpawn?: () => void;
   permissionMode?: 'dontAsk' | 'plan' | 'acceptEdits';
   tools?: string;
   bin?: string;
@@ -113,6 +115,7 @@ export async function* runCodeBuddy(request: CodeBuddyRequest): AsyncGenerator<B
   const timer = setTimeout(() => { const error = new Error(`CodeBuddy request timed out after ${timeoutMs}ms`); error.name = 'TimeoutError'; fail(error); }, timeoutMs);
   request.signal?.addEventListener('abort', onAbort, { once: true });
   const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(resolveExit => {
+    child.once('spawn', () => { request.onSpawn?.(); });
     child.once('error', error => { failure ??= error; });
     child.once('close', (code, signal) => { closed = true; resolveExit({ code, signal }); });
   });

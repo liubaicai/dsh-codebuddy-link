@@ -1,5 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { SettingsStore } from './settings.ts'
+import { isModelIdentifier } from './metadata.ts'
+import { isCodeBuddyEffort } from './config.ts'
 
 export interface AccountStatus {
   status: 'ok' | 'unavailable' | 'auth-required' | 'error'
@@ -24,7 +26,8 @@ export interface AuthService {
   cancelAll(): void
 }
 export function registerSettingsRoutes(server: WebServerLike, store: SettingsStore, notify: () => void,
-  refreshAccount: () => Promise<AccountStatus> = async () => ({status:'unavailable', message:'账户积分接口尚不可用；请在 CodeBuddy / WorkBuddy 客户端查看。'}), auth?: AuthService, refreshModels?: () => Promise<{models:{id:string;name:string;contextWindow?:number}[];message?:string}>): () => void {
+  refreshAccount: () => Promise<AccountStatus> = async () => ({status:'unavailable', message:'账户积分接口尚不可用；请在 CodeBuddy / WorkBuddy 客户端查看。'}), auth?: AuthService, refreshModels?: () => Promise<{models:{id:string;name:string;contextWindow?:number}[];message?:string}>,
+  readRuns: () => unknown[] = () => []): () => void {
   let account: AccountStatus = {status:'unavailable',message:'点击刷新查询账户积分。'}
   let pending: Promise<void> | undefined
   let generation = 0
@@ -36,7 +39,10 @@ export function registerSettingsRoutes(server: WebServerLike, store: SettingsSto
     modelMessage,
     auth: auth ? await auth.status() : {configured:false},
     config: {enabled:store.config.enabled, permissionMode:store.config.permissionMode, models:store.config.models,
-      hiddenModels:store.config.hiddenModels, defaultModel:store.config.defaultModel, tools:store.config.tools},
+      hiddenModels:store.config.hiddenModels, defaultModel:store.config.defaultModel, tools:store.config.tools,
+      reasoningEffort:store.config.reasoningEffort, maxConcurrency:store.config.maxConcurrency,
+      queueTimeoutMs:store.config.queueTimeoutMs, stallWarnMs:store.config.stallWarnMs},
+    runs: publicRuns(readRuns()),
     account, catalogModels:[...new Map([...catalog, ...store.config.models.filter(id => !catalog.some(m => m.id === id)).map(id => ({id,name:id === 'default' ? 'CodeBuddy CLI 默认模型' : id}))].map(m => [m.id,m])).values()],
   })
   const disposers: (() => void)[] = []
@@ -97,6 +103,36 @@ export function registerSettingsRoutes(server: WebServerLike, store: SettingsSto
     if (typeof dispose === 'function') disposers.push(dispose as () => void)
   }
   return () => { generation++; auth?.cancelAll(); for (const dispose of disposers.reverse()) dispose() }
+}
+// A runtime snapshot is deliberately a metadata-only boundary, never a raw runner object.
+function publicRuns(values: unknown[]): Record<string, unknown>[] {
+  if (!Array.isArray(values)) return []
+  const nonterminal: Record<string, unknown>[] = []
+  const terminal: Record<string, unknown>[] = []
+  for (const value of values) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    const run = value as Record<string, unknown>
+    if (typeof run.id !== 'string' || !['model', 'ask'].includes(String(run.source))
+      || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(run.state))
+      || typeof run.requestedModel !== 'string' || typeof run.requestedEffort !== 'string'
+      || typeof run.queuedAt !== 'number' || !Number.isFinite(run.queuedAt)) continue
+    const clean: Record<string, unknown> = {id:run.id, source:run.source, state:run.state,
+      requestedModel:isModelIdentifier(run.requestedModel) ? run.requestedModel : 'unknown', requestedEffort:isCodeBuddyEffort(run.requestedEffort) ? run.requestedEffort : 'auto', queuedAt:run.queuedAt,
+      contextOverrideSent:false, reasoningConfirmed:false, warning:run.warning === true,
+      queuePosition:Number.isSafeInteger(run.queuePosition) && Number(run.queuePosition) >= 0 ? run.queuePosition : 0}
+    if (isModelIdentifier(run.returnedModel)) clean.returnedModel = run.returnedModel
+    if (run.contextSource === 'model' || run.contextSource === 'fallback') clean.contextSource = run.contextSource
+    for (const key of ['contextWindow', 'startedAt', 'lastProgressAt', 'endedAt', 'totalCredits', 'totalCostUsd']) {
+      if (typeof run[key] === 'number' && Number.isFinite(run[key]) && run[key] >= 0) clean[key] = run[key]
+    }
+    if (['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(run.failure))) clean.failure = run.failure
+    // Snapshots arrive newest first; terminal history must never crowd out live calls.
+    if (['completed', 'failed', 'cancelled'].includes(String(clean.state))) {
+      if (terminal.length < 50) terminal.push(clean)
+    } else if (nonterminal.length < 80) nonterminal.push(clean)
+    if (nonterminal.length === 80 && terminal.length === 50) break
+  }
+  return [...nonterminal, ...terminal]
 }
 function sameHost(origin: string, host: string | undefined): boolean {
   try { const url = new URL(origin); return ['http:','https:'].includes(url.protocol) && url.host === host } catch { return false }

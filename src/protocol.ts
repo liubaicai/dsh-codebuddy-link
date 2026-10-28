@@ -1,8 +1,10 @@
 import { StringDecoder } from 'node:string_decoder';
+import { isModelIdentifier } from './metadata.ts';
 
 export type BridgeEvent =
   | { type: 'text' | 'reasoning'; delta: string }
   | { type: 'usage'; input: number; output: number; cacheRead: number; cacheWrite: number }
+  | { type: 'metadata'; model?: string; totalCredits?: number; totalCostUsd?: number }
   | { type: 'tool-start'; id: string; name: string; input?: unknown }
   | { type: 'tool-end'; id: string; name?: string; output?: unknown; isError?: boolean }
   | { type: 'result'; sessionId?: string; text: string; structuredOutput?: unknown };
@@ -59,7 +61,9 @@ export class CodeBuddyProtocol {
     const events: BridgeEvent[] = [];
     if (typeof row.session_id === 'string') this.sessionId = row.session_id;
     if (row.type === 'error') throw new Error('CodeBuddy reported a protocol error');
-    if (row.type === 'stream_event') {
+    if (row.type === 'system' && row.subtype === 'init') {
+      this.emitMetadata({ model: row.model }, events);
+    } else if (row.type === 'stream_event') {
       // Subagent streams are not the main assistant response.
       if (row.parent_tool_use_id) return events;
       const event = record(row.event);
@@ -82,6 +86,7 @@ export class CodeBuddyProtocol {
       }
     } else if (row.type === 'assistant' && !row.parent_tool_use_id) {
       const message = record(row.message);
+      this.emitMetadata({ model: message.model }, events);
       const id = text(message.id) || this.activeId || text(row.uuid) || `assistant-${++this.sequence}`;
       if (!this.assistantIds.has(id)) {
         this.assistantIds.add(id);
@@ -121,6 +126,7 @@ export class CodeBuddyProtocol {
       if (row.usage !== undefined) this.emitUsage(this.parseUsage(row.usage), events);
       const resultText = typeof row.result === 'string' ? row.result : this.output;
       if (!this.output && resultText) events.push({ type: 'text', delta: resultText });
+      this.emitMetadata({ totalCredits: row.total_credits, totalCostUsd: row.total_cost_usd }, events);
       events.push({ type: 'result', ...(this.sessionId ? { sessionId: this.sessionId } : {}), text: resultText, ...(row.structured_output !== undefined ? { structuredOutput: row.structured_output } : {}) });
     }
     return events;
@@ -154,6 +160,16 @@ export class CodeBuddyProtocol {
     if (!id || this.tools.has(id)) return;
     this.tools.set(id, name);
     events.push({ type: 'tool-start', id, name, input: block.input });
+  }
+  private emitMetadata(raw: RecordValue, events: BridgeEvent[]): void {
+    const metadata: Extract<BridgeEvent, { type: 'metadata' }> = { type: 'metadata' };
+    // Compare the full match too: JavaScript's $ can match before a final newline.
+    if (isModelIdentifier(raw.model)) metadata.model = raw.model;
+    for (const key of ['totalCredits', 'totalCostUsd'] as const) {
+      const value = raw[key];
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) metadata[key] = value;
+    }
+    if (metadata.model !== undefined || metadata.totalCredits !== undefined || metadata.totalCostUsd !== undefined) events.push(metadata);
   }
   private parseUsage(value: unknown): Usage {
     const usage = record(value);

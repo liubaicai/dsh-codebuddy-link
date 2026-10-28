@@ -1,23 +1,26 @@
 import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
 import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm';
+import { CODEBUDDY_EFFORTS } from "./config.js";
+import { resolveEffort } from "./effort.js";
+import { CallRuntime } from "./runtime.js";
 import { buildPrompt, parseResponse } from "./prompt.js";
 import { runCodeBuddy } from "./runner.js";
-/** Reasoning effort levels accepted by the CodeBuddy CLI --effort flag (verified against CLI 2.177.1). */
-export const CODEBUDDY_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
-const EFFORT_LABELS = { minimal: '极简', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最大', ultracode: 'ultracode' };
-const isCodeBuddyEffort = (value) => typeof value === 'string' && CODEBUDDY_EFFORTS.includes(value);
+export { CODEBUDDY_EFFORTS } from "./config.js";
+const EFFORT_LABELS = { auto: 'CLI 默认', minimal: '极简', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最大', ultracode: 'ultracode' };
 export class CodeBuddyAdapter extends LlmAdapter {
     config;
     runner;
     sessionCwd;
     authToken;
-    constructor(config, runner = runCodeBuddy, sessionCwd = () => undefined, authToken) {
+    runtime;
+    constructor(config, runner = runCodeBuddy, sessionCwd = () => undefined, authToken, runtime = new CallRuntime(config)) {
         super();
         this.config = config;
         this.runner = runner;
         this.sessionCwd = sessionCwd;
         this.authToken = authToken;
+        this.runtime = runtime;
     }
     /** Saved plugin credential, when present and readable, authenticates the CLI child. */
     async resolveAuthToken() {
@@ -40,7 +43,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
             context: { contextWindow: model === 'default' ? this.config.contextWindow : (this.config.modelContext[model] ?? this.config.contextWindow) },
             // Exposing reasoning efforts makes DSH render its 思考等级 picker; the
             // chosen value flows back as options.reasoningEffort into --effort.
-            reasoning: { efforts: CODEBUDDY_EFFORTS.map(id => ({ id: id, name: id === 'ultracode' ? id : `${id} · ${EFFORT_LABELS[id]}` })) },
+            reasoning: { efforts: CODEBUDDY_EFFORTS.map(id => ({ id: id, name: id === 'ultracode' ? id : `${id} ${EFFORT_LABELS[id]}` })) },
         };
     }
     async prepareCall(provider, model, signal) {
@@ -97,12 +100,14 @@ export class CodeBuddyAdapter extends LlmAdapter {
             // input ~4-8x (a 34K-token surface became 315K), triples wall time and is
             // unreliable (sometimes refuses the internal StructuredOutput tool), while
             // the prompt envelope yields valid JSON at plain-mode speed and cost.
-            for await (const event of this.runner({
+            for await (const event of this.runtime.run({
                 prompt, systemPrompt: options.system, cwd, bin: cfg.codebuddyBin || undefined,
                 model: (options.model || cfg.defaultModel) === 'default' ? undefined : (options.model || cfg.defaultModel),
-                effort: isCodeBuddyEffort(options.reasoningEffort) ? options.reasoningEffort : undefined, permissionMode: 'dontAsk', tools: '',
+                effort: resolveEffort(options.reasoningEffort, cfg.reasoningEffort), permissionMode: 'dontAsk', tools: '',
                 timeoutMs: cfg.timeoutMs, signal: options.signal, authToken: await this.resolveAuthToken(),
-            })) {
+            }, 'model', this.runner, structured ? event => {
+                parseResponse(event.structuredOutput ?? (event.text || rawText), tools);
+            } : undefined)) {
                 if (event.type === 'text') {
                     rawText += event.delta;
                     if (!structured)
