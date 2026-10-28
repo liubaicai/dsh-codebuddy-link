@@ -1,0 +1,108 @@
+import '@deepseek-ai/dsh-commands';
+import { defineTool } from '@deepseek-ai/dsh-tools';
+import { CodeBuddyAdapter } from "./adapter.js";
+import { resolveConfig } from "./config.js";
+import { runCodeBuddy } from "./runner.js";
+import { SettingsStore } from "./settings.js";
+import { registerSettingsRoutes } from "./web.js";
+import { createAccountRefresher } from "./credits.js";
+import { AuthStore, AuthManager } from "./auth.js";
+import { createModelDiscoverer } from "./models.js";
+export const name = 'dsh-codebuddy-link';
+export const inject = ['llm', 'commands'];
+export function apply(ctx, entry = {}) {
+    const store = new SettingsStore(entry);
+    const config = store.config;
+    const credentials = new AuthStore();
+    /** The saved plugin credential is handed to every CLI child via CODEBUDDY_AUTH_TOKEN. */
+    const readAuthToken = async () => {
+        try {
+            return (await credentials.read())?.accessToken;
+        }
+        catch {
+            return undefined;
+        }
+    };
+    ctx.inject(['webServer'], sub => {
+        const server = sub.get('webServer');
+        if (!server)
+            return;
+        const manager = new AuthManager(credentials);
+        const fileRefresh = createAccountRefresher();
+        const savedRefresh = createAccountRefresher({ readCredentials: async () => {
+                const login = await credentials.read();
+                return login ? { auth: { accessToken: login.accessToken, tokenType: 'Bearer' }, account: { uid: login.uid } } : undefined;
+            } });
+        const refresh = async () => (await credentials.status()).configured ? savedRefresh() : fileRefresh();
+        return registerSettingsRoutes(server, store, () => ctx.emit('llm/adapters-updated'), refresh, {
+            status: () => credentials.status(), import: value => manager.import(value), clear: () => manager.clear(),
+            start: () => manager.start(), poll: id => manager.poll(id), cancel: id => manager.cancel(id), cancelAll: () => manager.cancelAll(),
+        }, createModelDiscoverer({ bin: config.codebuddyBin, readCredentials: () => credentials.read() }));
+    });
+    const sessionCwd = (id) => {
+        const sessions = ctx.get('sessions');
+        return sessions?.get(id)?.header?.cwd;
+    };
+    if (config.enabled)
+        ctx.llm.registerAdapter(['codebuddy'], new CodeBuddyAdapter(config, runCodeBuddy, sessionCwd, readAuthToken));
+    ctx.commands.register({
+        name: 'codebuddy', description: 'CodeBuddy bridge status, models and setup',
+        input: { hint: '<status|models|help>' },
+        handler: ({ rawInput }) => {
+            const command = rawInput.trim() || 'help';
+            if (command === 'status')
+                return { kind: 'success', text: [
+                        '**CodeBuddy bridge**', `Enabled: ${config.enabled}`, `CLI: ${config.codebuddyBin || 'codebuddy (PATH)'}`,
+                        `Model: ${config.defaultModel}`, 'Provider tools: DSH-managed; CodeBuddy built-in tools disabled',
+                        `Delegation tools: ${config.tools || 'disabled'} (${config.permissionMode})`,
+                        `Workspace: ${config.workspaceRoot || 'DSH session workspace'}`,
+                        'Authentication: the saved CodeBuddy plugin credential is passed to the CLI automatically; otherwise the CLI uses its own login. This status does not verify login.',
+                    ].join('\n') };
+            if (command === 'models')
+                return { kind: 'success', text: config.models.filter(id => !config.hiddenModels.includes(id)).map(id => `- codebuddy/${id}`).join('\n') };
+            if (command !== 'help')
+                return { kind: 'error', text: `Unknown subcommand: ${command}. Use /codebuddy help.` };
+            return { kind: 'success', text: '/codebuddy status — configuration\n/codebuddy models — configured models\nSelect codebuddy/default in the DSH model picker. Install and sign in to the official CodeBuddy CLI first. Additional model IDs can be configured with DSH_CODEBUDDY_MODELS.' };
+        },
+    });
+    if (!config.enabled || !config.askTool)
+        return;
+    ctx.inject(['tools'], sub => {
+        sub.tools.register(defineTool({
+            name: 'codebuddy_ask',
+            description: 'Ask CodeBuddy CLI a standalone question without changing the current DSH model. No DSH history is sent. Built-in CLI tools are disabled unless the administrator explicitly configured them; enabled CLI tools operate outside the DSH file sandbox.',
+            parameters: {
+                prompt: { type: 'string', required: true, description: 'Self-contained question or task.' },
+                model: { type: 'string', description: 'Exact CodeBuddy model ID, or default.' },
+            },
+            output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
+            timeoutMs: config.timeoutMs + 5000,
+            async execute(args, exec) {
+                const agent = exec.agent;
+                const cwd = config.workspaceRoot || agent?.session?.header?.cwd;
+                if (config.tools && !cwd)
+                    throw new Error('Set workspaceRoot before enabling CodeBuddy delegation tools; session workspace is unavailable');
+                if (!args.prompt.trim())
+                    throw new Error('prompt must not be empty');
+                if (args.prompt.length > config.maxPromptChars)
+                    throw new Error('prompt exceeds maxPromptChars');
+                let text = '';
+                let result = '';
+                const model = args.model || config.defaultModel;
+                if (!config.models.includes(model) || config.hiddenModels.includes(model))
+                    throw new Error('CodeBuddy model is not enabled in settings');
+                for await (const event of runCodeBuddy({ prompt: args.prompt, cwd: cwd || process.cwd(), bin: config.codebuddyBin || undefined,
+                    model: model === 'default' ? undefined : model, permissionMode: config.permissionMode, tools: config.tools,
+                    timeoutMs: config.timeoutMs, signal: exec.signal, authToken: await readAuthToken() })) {
+                    if (event.type === 'text')
+                        text += event.delta;
+                    if (event.type === 'result')
+                        result = event.text;
+                }
+                return result || text;
+            },
+        }));
+    });
+}
+export { CodeBuddyAdapter, resolveConfig };
+//# sourceMappingURL=index.js.map

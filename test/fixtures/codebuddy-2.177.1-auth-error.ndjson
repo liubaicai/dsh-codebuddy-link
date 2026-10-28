@@ -1,0 +1,4 @@
+{"type":"system","subtype":"init","session_id":"sanitized-session","model":"deepseek-v4.1-flash","permissionMode":"dontAsk"}
+{"type":"system","subtype":"status","status":null,"session_id":"sanitized-session"}
+{"type":"assistant","session_id":"sanitized-session","parent_tool_use_id":null,"message":{"id":"sanitized-message","content":[{"type":"text","text":"401 Unauthorized"}],"model":"deepseek-v4.1-flash","role":"assistant","type":"message","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"sanitized-session","usage":{"input_tokens":0,"output_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"errors":["401 Authentication required. Please use /login command to sign in to your account"]}

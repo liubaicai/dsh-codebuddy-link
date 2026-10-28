@@ -1,0 +1,46 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22.18.0', '24']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - name: Check committed build artifacts
+        shell: bash
+        run: |
+          git diff --exit-code -- dist
+          test -z "$(git ls-files --others --exclude-standard dist)"
+      - run: npm run verify:package
+      - run: npm pack
+      - name: Install from Git without lifecycle scripts or build dependencies
+        shell: bash
+        run: |
+          source="$(node -e 'console.log(require("node:url").pathToFileURL(process.cwd()).href)')"
+          revision="$(git rev-parse HEAD)"
+          mkdir -p .release-smoke
+          cd .release-smoke
+          npm init -y
+          npm install --ignore-scripts --omit=dev --no-audit --no-fund "git+$source#$revision"
+          node --input-type=module -e 'const p = await import("./node_modules/dsh-codebuddy-link/dist/prompt.js"); if (p.parseResponse({text:"ok"}, []).text !== "ok") process.exit(1); await import("dsh-codebuddy-link");'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.os }}-node-${{ matrix.node }}
+          path: dsh-codebuddy-link-*.tgz

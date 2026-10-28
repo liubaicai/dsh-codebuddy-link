@@ -1,0 +1,5 @@
+# Local installation: dsh plugin --profile web add <absolute-path-to-package.tgz>
+- insert:
+    - id: codebuddy-link
+      name: 'dsh-codebuddy-link'
+      config: {}

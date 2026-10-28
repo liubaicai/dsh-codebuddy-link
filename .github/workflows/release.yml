@@ -1,0 +1,46 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.18.0'
+          cache: npm
+      - name: Match tag to package version
+        run: node -e 'const p=require("./package.json"); if (process.env.GITHUB_REF_NAME !== "v"+p.version) throw Error("Tag/package version mismatch")'
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - name: Verify committed dist
+        run: |
+          git diff --exit-code -- dist
+          test -z "$(git ls-files --others --exclude-standard dist)"
+      - run: npm run verify:package
+      - run: npm pack
+      - name: Smoke-test release archive
+        run: |
+          archive="$PWD/dsh-codebuddy-link-$(node -p 'require("./package.json").version').tgz"
+          mkdir .release-smoke
+          cd .release-smoke
+          npm init -y
+          npm install --ignore-scripts --omit=dev --no-audit --no-fund "$archive"
+          node --input-type=module -e 'await import("dsh-codebuddy-link"); const p=await import("./node_modules/dsh-codebuddy-link/dist/prompt.js"); if(p.parseResponse({text:"ok"},[]).text!=="ok") process.exit(1)'
+      - name: Publish release and checksum
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          archive="dsh-codebuddy-link-$(node -p 'require("./package.json").version').tgz"
+          sha256sum "$archive" > SHA256SUMS.txt
+          gh release create "$GITHUB_REF_NAME" "$archive" SHA256SUMS.txt --verify-tag --title "$GITHUB_REF_NAME" --generate-notes

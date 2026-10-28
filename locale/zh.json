@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Codebuddy 桥接",
+    "description": "通过官方 CodeBuddy CLI 直接调用模型，无需逆向模型 API，与 WorkBuddy 共享账户积分。"
+  }
+}

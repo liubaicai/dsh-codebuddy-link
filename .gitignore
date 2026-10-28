@@ -1,0 +1,12 @@
+node_modules/
+*.tgz
+*.log
+.env
+.env.*
+!.env.example
+coverage/
+tmp-*
+.release-smoke/
+credentials.json
+*.pem
+*.key

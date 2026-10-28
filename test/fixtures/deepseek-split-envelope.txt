@@ -1,0 +1,3 @@
+{"text":"示例检查已完成：界面中的选项可能由设置开关控制。接下来读取示例说明，确认开关名称与文案的对应关系。"}
+
+{"toolCalls":[{"name":"pwsh","arguments":"{\"description\":\"Confirm developerTools maps to Coding Tools toggle\",\"command\":\"$m='C:/example/dsh'; Get-Content -LiteralPath \\\"$m/locale/zh.json\\\" -Raw; Select-String -LiteralPath \\\"$m/README.md\\\" -Pattern 'developerTools|Coding Tools|preset' -Context 1,1\"}"}]}

@@ -1,0 +1,12 @@
+dsh-codebuddy-link
+
+Architecture reference: amlyczz/dsh-agy-link
+https://github.com/amlyczz/dsh-agy-link
+Reference commit: e7084f0e574af2b422a2676156e2a1cdf9ec9d82
+Upstream license: MIT; see LICENSE for retained attribution and terms.
+
+This project adapts the CLI-provider bridge pattern to Tencent CodeBuddy CLI.
+The CodeBuddy process runner, stream-json normalization, DSH structured-tool
+mapping, configuration, commands and tests are implemented for this project.
+It does not include, redistribute, or bypass authentication for CodeBuddy.
+It is not an official Tencent or DeepSeek product.
