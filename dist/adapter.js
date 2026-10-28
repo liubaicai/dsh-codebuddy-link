@@ -4,7 +4,7 @@ import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm';
 import { CODEBUDDY_EFFORTS } from "./config.js";
 import { resolveEffort } from "./effort.js";
 import { CallRuntime } from "./runtime.js";
-import { buildPrompt, parseResponse } from "./prompt.js";
+import { buildPrompt, buildSystemPrompt, parseResponse } from "./prompt.js";
 import { runCodeBuddy } from "./runner.js";
 /** Display only model output, never prompts, credentials, stderr or raw transport events.
  * A longer-than-content Markdown fence prevents model-supplied fences/HTML from
@@ -136,13 +136,12 @@ export class CodeBuddyAdapter extends LlmAdapter {
             return chunks;
         };
         try {
-            // Structured replies are requested via the prompt envelope, NOT the CLI's
-            // --json-schema flag: measured on CLI 2.177.1, that mode inflates billed
-            // input ~4-8x (a 34K-token surface became 315K), triples wall time and is
-            // unreliable (sometimes refuses the internal StructuredOutput tool), while
-            // the prompt envelope yields valid JSON at plain-mode speed and cost.
+            // Request independent JSON records through the transport contract, NOT
+            // --json-schema: on CLI 2.177.1 that mode inflated billed input ~4-8x
+            // and sometimes refused its internal StructuredOutput tool. Prompting is
+            // not constrained decoding: malformed responses still fail atomically.
             for await (const event of this.runtime.run({
-                prompt, systemPrompt: options.system, cwd, bin: cfg.codebuddyBin || undefined,
+                prompt, systemPrompt: buildSystemPrompt(options.system, structured), cwd, bin: cfg.codebuddyBin || undefined,
                 model: (options.model || cfg.defaultModel) === 'default' ? undefined : (options.model || cfg.defaultModel),
                 effort: resolveEffort(options.reasoningEffort, cfg.reasoningEffort), permissionMode: 'dontAsk', tools: '',
                 timeoutMs: cfg.timeoutMs, signal: options.signal, authToken: await this.resolveAuthToken(),
@@ -194,13 +193,17 @@ export class CodeBuddyAdapter extends LlmAdapter {
         }
         catch (error) {
             yield* close();
-            if (parseFailed && !options.signal?.aborted) {
-                yield* append('text', failedResponseText(resultText, rawText, structuredOutput));
+            const diagnostic = parseFailed && !options.signal?.aborted ? failedResponseText(resultText, rawText, structuredOutput) : '';
+            if (diagnostic) {
+                yield* append('text', diagnostic);
                 yield* close();
             }
             if (usage)
                 yield { type: 'usage', usage };
-            yield { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: { code: options.signal?.aborted ? 'ABORTED' : 'CODEBUDDY_ERROR', message: error instanceof Error ? error.message : String(error) } } };
+            // Error finishes can move streamed text into a hidden assistant/attempt.
+            // Put the same complete diagnostic in the error channel the host displays.
+            const message = [error instanceof Error ? error.message : String(error), diagnostic].filter(Boolean).join('\n\n');
+            yield { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: { code: options.signal?.aborted ? 'ABORTED' : 'CODEBUDDY_ERROR', message } } };
         }
     }
 }

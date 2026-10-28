@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.19
+
+- Normalize valid historical tool arguments to objects in prompt projections, without rewriting stored history. Put the serialization-only transport contract at system priority and request independent NDJSON records rather than one deeply nested batch envelope. Preserve legacy response formats and atomic fail-closed parsing; no JSON repair, automatic retries or schema-mode billing changes.
+- Include complete parse-failure diagnostics in the terminal error message as well as text chunks, because DSH may store failed text streams only as hidden attempts. Keep cancellation/transport errors and metadata-only settings history unchanged.
+- Add multi-cycle prompt, policy-preservation, complex-script record and missing/extra-brace atomic-failure regressions.
+
 ## 0.3.18
 
 - Show the complete model reply as a fenced diagnostic when provider response parsing fails, while retaining an error finish and executing no tool calls. Preserve final-result-only replies, usage and failed runtime status; keep raw replies out of settings diagnostics. No automatic repair, retry or model calls.
