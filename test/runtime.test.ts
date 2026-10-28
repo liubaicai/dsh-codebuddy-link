@@ -83,7 +83,7 @@ test('failure and validation errors are classified without leaking details; queu
   assert.equal(runtime.snapshots()[0]!.state, 'completed')
 })
 
-test('runtime retains only 50 completed records and rejects unsafe metadata', async () => {
+test('runtime retains only five recent records and rejects unsafe metadata', async () => {
   const runtime = new CallRuntime(resolveConfig({}, {}))
   const runner: typeof runCodeBuddy = async function* () {
     yield { type: 'metadata', model: 'unsafe\n', totalCredits: NaN, totalCostUsd: -1 }
@@ -91,7 +91,7 @@ test('runtime retains only 50 completed records and rejects unsafe metadata', as
   }
   for (let i = 0; i < 55; i++) await collect(runtime.run({ ...request, model: undefined }, 'model', runner))
   const snapshots = runtime.snapshots()
-  assert.equal(snapshots.length, 50)
+  assert.equal(snapshots.length, 5)
   assert.ok(snapshots.every(run => run.returnedModel === undefined && run.totalCredits === undefined && run.totalCostUsd === undefined && run.contextSource === 'fallback'))
 })
 
@@ -107,6 +107,28 @@ test('pre-abort does not invoke CLI and bounded queue rejects overflow', async (
   const queued = Array.from({ length: 64 }, () => collect(runtime.run(request, 'ask', runner)))
   await assert.rejects(collect(runtime.run(request, 'ask', runner)), { name: 'QueueFullError' })
   gate.resolve(); await Promise.all([first, ...queued]); assert.equal(calls, 65)
+})
+
+test('five-record retention never cancels evicted live calls or changes FIFO scheduling', async () => {
+  const runtime = new CallRuntime(resolveConfig({ maxConcurrency: 1 }, {}))
+  const gate = deferred(), started = deferred(), order: string[] = []
+  const runner: typeof runCodeBuddy = async function* (req) {
+    order.push(req.model!); req.onSpawn?.(); started.resolve()
+    await gate.promise
+    yield { type: 'result', text: '' }
+  }
+  const first = collect(runtime.run({ ...request, model: 'call-0' }, 'model', runner))
+  await started.promise
+  const queued = Array.from({ length: 7 }, (_, i) => collect(runtime.run({ ...request, model: `call-${i + 1}` }, 'ask', runner)))
+  const expected = ['call-7', 'call-6', 'call-5', 'call-4', 'call-3']
+  assert.deepEqual(runtime.snapshots().map(run => run.requestedModel), expected)
+  assert.deepEqual(runtime.snapshots().map(run => run.queuePosition), [7, 6, 5, 4, 3])
+  gate.resolve(); await Promise.all([first, ...queued])
+  assert.deepEqual(order, Array.from({ length: 8 }, (_, i) => `call-${i}`))
+  assert.deepEqual(runtime.snapshots().map(run => run.requestedModel), expected)
+  assert.ok(runtime.snapshots().every(run => run.state === 'completed'))
+  await collect(runtime.run({ ...request, model: 'call-8' }, 'model', runner))
+  assert.deepEqual(runtime.snapshots().map(run => run.requestedModel), ['call-8', ...expected.slice(0, 4)])
 })
 
 test('both paths use strict shared effort precedence and explicit auto', () => {

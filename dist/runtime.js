@@ -21,9 +21,10 @@ export class CallRuntime {
         }));
     }
     prune() {
-        const finished = [...this.records.values()].filter(record => terminal(record.state));
-        for (const record of finished.slice(0, Math.max(0, finished.length - 50)))
-            this.records.delete(record.id);
+        // Diagnostic retention is independent of scheduling: evicted live calls keep
+        // their local record and queue slot, but never re-enter the recent history.
+        for (const id of [...this.records.keys()].slice(0, Math.max(0, this.records.size - 5)))
+            this.records.delete(id);
     }
     /** Re-evaluate live concurrency changes without interrupting active calls. */
     refresh() { this.pump(); }
@@ -75,6 +76,7 @@ export class CallRuntime {
             contextOverrideSent: false, reasoningConfirmed: false, queuedAt: Date.now(), warning: false, queuePosition: 0,
         };
         this.records.set(record.id, record);
+        this.prune();
         let release;
         try {
             release = await this.acquire(record.id, request.signal);

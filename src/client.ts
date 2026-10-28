@@ -122,8 +122,7 @@ function isModelIdentifier(value: unknown): value is string {
 }
 function parseRuns(value: unknown): RunSnapshot[] {
   if (!Array.isArray(value)) return [];
-  const nonterminal: RunSnapshot[] = [];
-  const terminal: RunSnapshot[] = [];
+  const runs: RunSnapshot[] = [];
   for (const entry of value) {
     if (!isRecord(entry) || typeof entry.id !== 'string' || !['model', 'ask'].includes(String(entry.source))
       || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(entry.state))
@@ -139,13 +138,10 @@ function parseRuns(value: unknown): RunSnapshot[] {
       if (typeof entry[key] === 'number' && Number.isFinite(entry[key]) && entry[key] >= 0) run[key] = entry[key];
     }
     if (['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(entry.failure))) run.failure = entry.failure as RunSnapshot['failure'];
-    // Mirror the server cap without letting newer terminal history hide live calls.
-    if (['completed', 'failed', 'cancelled'].includes(run.state)) {
-      if (terminal.length < 50) terminal.push(run);
-    } else if (nonterminal.length < 80) nonterminal.push(run);
-    if (nonterminal.length === 80 && terminal.length === 50) break;
+    runs.push(run);
   }
-  return [...nonterminal, ...terminal];
+  // Latest five total, regardless of state or server ordering; retain only sanitized fields.
+  return runs.sort((a, b) => b.queuedAt - a.queuedAt).slice(0, 5);
 }
 
 function officialVerificationUri(value: unknown): string | null {
@@ -242,6 +238,17 @@ function SettingsPanel(): unknown {
   const authPending = useRef(false);
   const authSequence = useRef(0);
 
+  // The caller holds its in-flight lock for the entire chain. Check its generation
+  // after each await, before updating state or starting another external request.
+  async function refreshAccount(current: () => boolean): Promise<void> {
+    const account = await request('refresh', {});
+    if (!current()) return;
+    setStatus(account);
+    if (account.account.status !== 'ok') return;
+    const models = await request('models', {});
+    if (current()) setStatus(models);
+  }
+
   async function authenticate(action: AuthAction): Promise<void> {
     if (!active.current || authPending.current || pending.current || !status) return;
     if ((action === 'poll' || action === 'cancel') && !authFlow) return;
@@ -267,8 +274,12 @@ function SettingsPanel(): unknown {
           ? { ...previous, auth: { configured: result.configured as boolean } } : previous);
         // Deliberately bypass load(): a successful login must not replace the model draft.
         try {
-          const refreshed = await request('status');
-          if (current()) setStatus(refreshed);
+          if (action === 'clear') {
+            const refreshed = await request('status');
+            if (current()) setStatus(refreshed);
+          } else {
+            await refreshAccount(current);
+          }
         } catch {
           if (current()) setAuthError('登录操作已完成，但状态刷新失败，请手动刷新账户。');
         }
@@ -283,7 +294,7 @@ function SettingsPanel(): unknown {
     }
   }
 
-  async function load(action: 'status' | 'refresh' | 'config' | 'models', config?: Config, automatic = false): Promise<void> {
+  async function load(action: 'initial' | 'status' | 'refresh' | 'config' | 'models', config?: Config, automatic = false): Promise<void> {
     if (!active.current || pending.current || authPending.current) return;
     pending.current = true;
     const ticket = ++sequence.current;
@@ -292,17 +303,23 @@ function SettingsPanel(): unknown {
       setError('');
       setNotice('');
     }
+    const current = () => active.current && ticket === sequence.current;
     try {
-      const result = await request(action, action === 'status' ? undefined : (action === 'refresh' || action === 'models') ? {} : {
-        permissionMode: config!.permissionMode, models: config!.models, hiddenModels: config!.hiddenModels,
-        defaultModel: config!.defaultModel, tools: config!.tools, reasoningEffort: config!.reasoningEffort,
-        maxConcurrency: config!.maxConcurrency, queueTimeoutMs: config!.queueTimeoutMs, stallWarnMs: config!.stallWarnMs,
-      });
-      if (!active.current || ticket !== sequence.current) return;
-      setStatus(result);
-      // Refreshing account information must not discard unsaved form edits.
-      if (action === 'config') setDraft(result.config);
-      else if (action === 'status') setDraft(previous => previous ?? result.config);
+      if (action !== 'refresh') {
+        const endpoint = action === 'initial' ? 'status' : action;
+        const result = await request(endpoint, endpoint === 'status' ? undefined : endpoint === 'models' ? {} : {
+          permissionMode: config!.permissionMode, models: config!.models, hiddenModels: config!.hiddenModels,
+          defaultModel: config!.defaultModel, tools: config!.tools, reasoningEffort: config!.reasoningEffort,
+          maxConcurrency: config!.maxConcurrency, queueTimeoutMs: config!.queueTimeoutMs, stallWarnMs: config!.stallWarnMs,
+        });
+        if (!current()) return;
+        setStatus(result);
+        // Only a successful save replaces an existing draft, never background discovery.
+        if (action === 'config') setDraft(result.config);
+        else setDraft(previous => previous ?? result.config);
+      }
+      if (action === 'initial' || action === 'refresh') await refreshAccount(current);
+      if (!current()) return;
       if (!automatic) setNotice(action === 'config' ? '设置已保存' : action === 'refresh' ? '账户状态已刷新' : '');
     } catch (cause) {
       if (!automatic && active.current && ticket === sequence.current) setError(cause instanceof Error ? cause.message : '请求失败，请重试');
@@ -316,7 +333,7 @@ function SettingsPanel(): unknown {
 
   useEffect(() => {
     active.current = true;
-    void load('status');
+    void load('initial');
     const timer = setInterval(() => { void load('status', undefined, true); }, 2000);
     return () => { clearInterval(timer); active.current = false; ++sequence.current; ++authSequence.current; pending.current = false; authPending.current = false; };
   }, []);
@@ -339,7 +356,7 @@ function SettingsPanel(): unknown {
     h('p', null, status ? `插件状态：${status.config.enabled ? '已启用' : '未启用'}` : '正在读取插件状态'),
     h('div', { role: 'status', 'aria-live': 'polite' }, busy ? `${busy}…` : notice),
     error ? h('div', { role: 'alert', style: { margin: '12px 0' } }, error,
-      !status ? h('button', { type: 'button', disabled: !!busy, onClick: () => void load('status') }, '重试加载') : null) : null,
+      !status ? h('button', { type: 'button', disabled: !!busy, onClick: () => void load('initial') }, '重试加载') : null) : null,
     h('section', { style: { ...box, fontSize: '13px' }, 'aria-label': '账户登录' },
       h('h3', null, '账户登录'),
       h('p', null, '用于积分与模型列表查询，不改变 CodeBuddy CLI 登录。'),
@@ -376,12 +393,7 @@ function SettingsPanel(): unknown {
         h('span', null, `总额：${amount(account?.total)}`), h('span', null, `已用：${amount(account?.used)}`)),
       h('p', null, `单位：${text(account?.unit)}；更新时间：${text(account?.updatedAt)}`),
       h('p', null, `来源：${text(account?.source)}`),
-      h('p', null, '是否与 WorkBuddy 共享账户或积分，以接口返回为准。缺失字段显示“未知”，不推算余额。仅点击刷新账户时主动查询，不自动轮询。')),
-    h('section', {style:box, 'aria-label':'运行记录'},
-      h('h3', null, '运行记录'),
-      h('p', null, '仅当前进程内存，优先显示未结束调用（最多 80 条），另保留最近 50 条已结束记录，合计最多 130 条；此面板打开时每 2 秒刷新。不会保存提示词、原始输出或错误详情。'),
-      h('div', {style:{maxHeight:'420px', overflowY:'auto'}},
-        ...(status?.runs.length ? status.runs.map(renderRun) : [h('p', null, '暂无运行记录')]))),
+      h('p', null, '是否与 WorkBuddy 共享账户或积分，以接口返回为准。缺失字段显示“未知”，不推算余额。进入设置、手动刷新或登录成功后查询账户；账户可用时自动获取模型列表，不自动轮询外部服务。')),
     draft ? h('fieldset', { disabled: !!busy, style: { ...box, minWidth: 0 } },
       h('legend', null, '模型与独立委派设置'),
       h('label', { style: field }, '权限模式',
@@ -431,7 +443,12 @@ function SettingsPanel(): unknown {
         onChange: (event: { target: { value: string } }) => update({ tools: event.target.value }) })),
       !validDefault || !validMode ? h('p', { role: 'alert' }, '请选择有效的权限模式与已启用的默认模型。') : null,
       !validRuntime ? h('p', {role:'alert'}, '请检查推理强度、并发数与等待时间范围；时间必须为整数。') : null,
-      h('button', { type: 'button', disabled: !!busy || authBusy || !validDefault || !validMode || !validRuntime, onClick: () => void load('config', draft) }, '保存设置')) : null);
+      h('button', { type: 'button', disabled: !!busy || authBusy || !validDefault || !validMode || !validRuntime, onClick: () => void load('config', draft) }, '保存设置')) : null,
+    h('section', {style:box, 'aria-label':'运行记录'},
+      h('h3', null, '运行记录'),
+      h('p', null, '仅当前进程内存，按入队时间显示最近 5 条运行记录（包括进行中与已结束调用，合计最多 5 条）；此面板打开时每 2 秒刷新状态。不会保存提示词、原始输出或错误详情。'),
+      h('div', {style:{maxHeight:'420px', overflowY:'auto'}},
+        ...(status?.runs.length ? status.runs.map(renderRun) : [h('p', null, '暂无运行记录')]))));
 }
 
 export function apply(ctx: ClientContext): void {

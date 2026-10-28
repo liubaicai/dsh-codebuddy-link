@@ -124,8 +124,7 @@ export function registerSettingsRoutes(server, store, notify, refreshAccount = a
 function publicRuns(values) {
     if (!Array.isArray(values))
         return [];
-    const nonterminal = [];
-    const terminal = [];
+    const recent = [];
     for (const value of values) {
         if (!value || typeof value !== 'object' || Array.isArray(value))
             continue;
@@ -149,17 +148,12 @@ function publicRuns(values) {
         }
         if (['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(run.failure)))
             clean.failure = run.failure;
-        // Snapshots arrive newest first; terminal history must never crowd out live calls.
-        if (['completed', 'failed', 'cancelled'].includes(String(clean.state))) {
-            if (terminal.length < 50)
-                terminal.push(clean);
-        }
-        else if (nonterminal.length < 80)
-            nonterminal.push(clean);
-        if (nonterminal.length === 80 && terminal.length === 50)
-            break;
+        recent.push(clean);
+        recent.sort((a, b) => Number(b.queuedAt) - Number(a.queuedAt));
+        if (recent.length > 5)
+            recent.pop();
     }
-    return [...nonterminal, ...terminal];
+    return recent;
 }
 function sameHost(origin, host) {
     try {

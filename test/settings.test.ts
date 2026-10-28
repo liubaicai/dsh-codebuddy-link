@@ -116,7 +116,7 @@ test('concurrent refresh is single-flight and failures never disclose secrets', 
   } finally {release();dispose();server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve()));rmSync(dir,{recursive:true,force:true})}
 })
 
-test('run snapshots prioritize old nonterminal calls over newer history and cap sanitized metadata at 130', async () => {
+test('run snapshots expose only the latest five calls, independent of state or input order', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'cb-run-retention-'))
   const routes = new Map<string, Parameters<WebServerLike['register']>[0]['handler']>()
   const raw = {source:'model', requestedModel:'requested', requestedEffort:'high',
@@ -132,10 +132,11 @@ test('run snapshots prioritize old nonterminal calls over newer history and cap 
   const url = `http://127.0.0.1:${(server.address() as {port:number}).port}/plugins/codebuddy-link/status`
   try {
     for (const count of [4, 85]) {
-      runs = [null, {id:'invalid'}, ...terminal, ...live.slice(0, count)]
+      const newest = {...live[0], id:'newest-live', queuedAt:2000}
+      runs = [null, {id:'invalid'}, ...live.slice(0, count), ...terminal.toReversed(), newest]
       const body = await (await fetch(url)).json() as {runs:Record<string, unknown>[]}
-      assert.deepEqual(body.runs.map(run => run.id), [...live.slice(0, Math.min(count, 80)), ...terminal.slice(0, 50)].map(run => run.id))
-      assert.equal(body.runs.length, Math.min(count, 80) + 50)
+      assert.deepEqual(body.runs.map(run => run.id), [newest, ...terminal.slice(0, 4)].map(run => run.id))
+      assert.equal(body.runs.length, 5)
       assert.equal(body.runs[0]!.state, 'waiting'); assert.equal(body.runs[0]!.warning, true)
       assert.ok(body.runs.every(run => run.contextOverrideSent === false && run.reasoningConfirmed === false))
       assert.doesNotMatch(JSON.stringify(body), /PRIVATE-/)
@@ -158,7 +159,7 @@ test('HTTP settings enforce method, same origin, JSON and publish refresh status
     const initial = await (await fetch(base+'/status')).json() as {config:Record<string,unknown>; runs:Record<string,unknown>[]}
     assert.equal(initial.config.reasoningEffort,'auto'); assert.equal(initial.config.maxConcurrency,2)
     assert.equal(initial.config.queueTimeoutMs,600000); assert.equal(initial.config.stallWarnMs,90000)
-    assert.equal(initial.runs.length,50); assert.equal(initial.runs[0]!.totalCredits,0); assert.equal(initial.runs[0]!.totalCostUsd,0)
+    assert.equal(initial.runs.length,5); assert.equal(initial.runs[0]!.totalCredits,0); assert.equal(initial.runs[0]!.totalCostUsd,0)
     assert.equal(initial.runs[0]!.returnedModel,undefined)
     assert.doesNotMatch(JSON.stringify(initial), /private prompt|private output|private error|private path/)
     assert.equal((await fetch(base+'/config')).status,405)

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.17
+
+- Refresh the account automatically when opening settings, then fetch the model catalog only when the fresh account status is available. Manual account refresh follows the same sequence, without adding external requests to the local status polling loop or overwriting unsaved settings.
+- Keep only the five most recently queued call diagnostics across runtime, HTTP and UI; place the history below Save Settings. Removing an old diagnostic does not cancel its call or change FIFO scheduling.
+- Add regressions for sequential refresh, invalid accounts, stale/unmounted requests, draft preservation, history ordering/limits and scheduling after diagnostic eviction.
+
 ## 0.3.16
 
 - Add in-memory, metadata-only call diagnostics: requested/returned model, requested effort, declared DSH context budget and source, CLI-reported credits/USD cost, timestamps and terminal categories. Unknown values remain unknown; context override and confirmed server reasoning are never claimed. Restrict model identifiers and keep prompts, responses, credentials, raw errors and paths out of run snapshots.

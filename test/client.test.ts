@@ -22,6 +22,7 @@ function harness(replies: Reply[] = [{ value: payload() }]) {
   let cursor = 0;
   const state: any[] = [];
   const effects: (() => void | (() => void))[] = [];
+  const setups: (() => void | (() => void))[] = [];
   const cleanup: (() => void)[] = [];
   const calls: { url: string; init: any }[] = [];
   const registrations: { options: any; component: (props?: unknown) => unknown }[] = [];
@@ -57,7 +58,7 @@ function harness(replies: Reply[] = [{ value: payload() }]) {
         },
         useEffect: (effect: () => void | (() => void)) => {
           const index = cursor++;
-          if (!(index in state)) { state[index] = true; effects.push(effect); }
+          if (!(index in state)) { state[index] = true; effects.push(effect); setups.push(effect); }
         },
       };
     },
@@ -85,7 +86,14 @@ function harness(replies: Reply[] = [{ value: payload() }]) {
     while (effects.length) { const dispose = effects.shift()!(); if (dispose) cleanup.push(dispose); }
     return tree;
   }
-  return { exported, registrations, disposers, calls, state, render, cleanup, timers, tick: () => { for (const callback of timers.values()) callback(); }, disposed: () => disposed };
+  return { exported, registrations, disposers, calls, state, render, cleanup, timers,
+    remount: () => { cleanup.splice(0).forEach(dispose => dispose()); for (const setup of setups) { const dispose = setup(); if (dispose) cleanup.push(dispose); } },
+    tick: () => { for (const callback of timers.values()) callback(); }, disposed: () => disposed };
+}
+// Successful default account: mount reads status, refreshes account, then models.
+function mounted(replies: Reply[] = [{ value: payload() }]) {
+  const [initial, ...rest] = replies;
+  return harness([initial!, initial!, initial!, ...rest]);
 }
 function nodes(tree: unknown): Element[] {
   if (!tree || typeof tree !== 'object' || !('children' in tree)) return [];
@@ -106,7 +114,7 @@ const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 
 test('credit display uses two decimals without modifying response values', async () => {
   const response = { ...payload(), account: { status: 'ok', remaining: 12.3456, total: 20, used: 7.6544 } };
-  const app = harness([{ value: response }]); app.render(); await settle();
+  const app = mounted([{ value: response }]); app.render(); await settle();
   const shown = content(app.render());
   assert.match(shown, /剩余：12\.35/); assert.match(shown, /总额：20\.00/); assert.match(shown, /已用：7\.65/);
   assert.equal(response.account.remaining, 12.3456);
@@ -114,7 +122,7 @@ test('credit display uses two decimals without modifying response values', async
 
 test('discovered models can be selected and saved without typing IDs', async () => {
   const result = { ...payload(), catalogModels: [...payload().catalogModels, { id: 'discovered-id', name: 'Discovered' }] };
-  const app = harness([{ value: payload() }, { value: result }, { value: result }]);
+  const app = mounted([{ value: payload() }, { value: result }, { value: result }]);
   app.render(); await settle();
   let tree = app.render();
   button(tree, '获取模型列表').props.onClick(); await settle();
@@ -126,15 +134,15 @@ test('discovered models can be selected and saved without typing IDs', async () 
   tree = app.render();
   control(tree, '默认模型', 'select').props.onChange({ target: { value: 'discovered-id' } });
   tree = app.render(); button(tree, '保存设置').props.onClick(); await settle();
-  assert.equal(app.calls[1]!.url, '/plugins/codebuddy-link/models');
-  const saved = JSON.parse(app.calls[2]!.init.body);
+  assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/models');
+  const saved = JSON.parse(app.calls[4]!.init.body);
   assert.ok(saved.models.includes('discovered-id'));
   assert.equal(saved.defaultModel, 'discovered-id');
   for (const n of nodes(tree).filter(n => ['button', 'select', 'textarea', 'input'].includes(String(n.type)))) assert.ok(n.props.style);
 });
 
 test('settings inherit host theme and heading rows align without asymmetric margins', async () => {
-  const app = harness(); app.render(); await settle(); const tree = app.render();
+  const app = mounted(); app.render(); await settle(); const tree = app.render();
   assert.equal((tree.props.style as any).color, 'var(--dsw-alias-label-primary, inherit)');
   for (const title of ['账户与积分', '启用模型']) {
     const heading = nodes(tree).find(n => n.type === 'h3' && content(n) === title)!;
@@ -163,8 +171,8 @@ test('registers all native slots with exact keys and disposer propagation', () =
   assert.equal(app.calls.length, 0);
 });
 
-test('mount reads status once; unknown credits remain unknown and no automatic refresh', async () => {
-  const app = harness();
+test('mount refreshes account then models once; unknown credits remain unknown', async () => {
+  const app = mounted();
   assert.match(content(app.render()), /加载中/);
   await settle();
   const tree = app.render();
@@ -172,17 +180,24 @@ test('mount reads status once; unknown credits remain unknown and no automatic r
   assert.match(content(tree), /WorkBuddy.*以接口返回为准/);
   assert.match(content(tree), /仅对独立委派 CodeBuddy 工具生效；provider 工具权限仍由 DSH 管理/);
   app.render();
-  assert.equal(app.calls.length, 1);
+  assert.equal(app.calls.length, 3);
   assert.equal(app.calls[0]!.url, '/plugins/codebuddy-link/status');
   assert.equal(app.calls[0]!.init.method, 'GET');
-  assert.equal(app.calls[0]!.init.credentials, 'same-origin');
-  assert.equal(app.calls[0]!.init.mode, 'same-origin');
-  assert.equal(app.calls[0]!.init.signal.timeout, 20_000);
+  assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/models']);
+  for (const call of app.calls) {
+    assert.equal(call.init.credentials, 'same-origin');
+    assert.equal(call.init.mode, 'same-origin');
+    assert.equal(call.init.signal.timeout, 20_000);
+  }
+  for (const call of app.calls.slice(1)) {
+    assert.equal(call.init.method, 'POST');
+    assert.equal(call.init.body, '{}');
+  }
 });
 
 test('explicit refresh posts JSON, displays real zero, and preserves unsaved edits', async () => {
   const refreshed = { ...payload(), account: { status: 'ok', remaining: 0, used: 5, total: 5, message: '<img src=x onerror=alert(1)>' } };
-  const app = harness([{ value: payload() }, { value: refreshed }]);
+  const app = mounted([{ value: payload() }, { value: refreshed }, { value: refreshed }]);
   app.render(); await settle();
   control(app.render(), '权限模式', 'select').props.onChange({ target: { value: 'plan' } });
   button(app.render(), '刷新账户').props.onClick();
@@ -193,7 +208,7 @@ test('explicit refresh posts JSON, displays real zero, and preserves unsaved edi
   assert.match(content(tree), /剩余：0/);
   assert.match(content(tree), /<img src=x onerror=alert\(1\)>/);
   assert.ok(nodes(tree).every(node => !('dangerouslySetInnerHTML' in node.props) && node.type !== 'img'));
-  const call = app.calls[1]!;
+  const call = app.calls[3]!;
   assert.equal(call.url, '/plugins/codebuddy-link/refresh');
   assert.equal(call.init.headers['Content-Type'], 'application/json');
   assert.equal(call.init.body, '{}');
@@ -201,7 +216,7 @@ test('explicit refresh posts JSON, displays real zero, and preserves unsaved edi
 });
 
 test('custom models, visibility, default and tools serialize exact config contract', async () => {
-  const app = harness([{ value: payload() }, { value: payload() }]);
+  const app = mounted([{ value: payload() }, { value: payload() }]);
   app.render(); await settle();
   let tree = app.render();
   const checks = nodes(tree).filter(node => node.type === 'input' && node.props.type === 'checkbox');
@@ -219,14 +234,14 @@ test('custom models, visibility, default and tools serialize exact config contra
   // A second click before React renders is coalesced by the in-flight ref.
   button(app.render(), '保存设置').props.onClick();
   await settle();
-  assert.equal(app.calls.length, 2);
-  assert.equal(app.calls[1]!.url, '/plugins/codebuddy-link/config');
-  assert.deepEqual(JSON.parse(app.calls[1]!.init.body), { permissionMode: 'acceptEdits', models: ['basic', 'hidden', 'custom', 'new-model'], hiddenModels: ['hidden', 'basic'], defaultModel: 'new-model', tools: 'Read', reasoningEffort:'auto', maxConcurrency:2, queueTimeoutMs:600000, stallWarnMs:90000 });
+  assert.equal(app.calls.length, 4);
+  assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/config');
+  assert.deepEqual(JSON.parse(app.calls[3]!.init.body), { permissionMode: 'acceptEdits', models: ['basic', 'hidden', 'custom', 'new-model'], hiddenModels: ['hidden', 'basic'], defaultModel: 'new-model', tools: 'Read', reasoningEffort:'auto', maxConcurrency:2, queueTimeoutMs:600000, stallWarnMs:90000 });
   assert.match(content(app.render()), /设置已保存/);
 });
 
 test('HTTP errors are visible without reporting success or discarding edits', async () => {
-  const app = harness([{ value: payload() }, { ok: false, status: 403 }]);
+  const app = mounted([{ value: payload() }, { ok: false, status: 403 }]);
   app.render(); await settle();
   control(app.render(), '权限模式', 'select').props.onChange({ target: { value: 'plan' } });
   button(app.render(), '保存设置').props.onClick(); await settle();
@@ -238,7 +253,7 @@ test('HTTP errors are visible without reporting success or discarding edits', as
 });
 
 test('hiding every model requires a nonempty enabled default before saving', async () => {
-  const app = harness();
+  const app = mounted();
   app.render(); await settle();
   let checks = nodes(app.render()).filter(node => node.type === 'input' && node.props.type === 'checkbox');
   checks[0]!.props.onChange({ target: { checked: false } });
@@ -259,7 +274,7 @@ test('hiding every model requires a nonempty enabled default before saving', asy
 
 test('HTTP 400 error detail is limited to 300 characters and rendered as plain text', async () => {
   const detail = '<img src=x onerror=alert(1)>' + '错'.repeat(400);
-  const app = harness([{ value: payload() }, { ok: false, status: 400, value: { error: detail } }]);
+  const app = mounted([{ value: payload() }, { ok: false, status: 400, value: { error: detail } }]);
   app.render(); await settle();
   button(app.render(), '保存设置').props.onClick(); await settle();
   const tree = app.render();
@@ -269,19 +284,20 @@ test('HTTP 400 error detail is limited to 300 characters and rendered as plain t
 });
 
 test('invalid response and network errors expose retry, then recover', async () => {
-  const app = harness([{ value: { config: {} } }, { error: new Error('timeout') }, { value: payload() }]);
+  const app = harness([{ value: { config: {} } }, { error: new Error('timeout') }, { value: payload() }, { value: payload() }, { value: payload() }]);
   app.render(); await settle();
   assert.match(content(app.render()), /服务端状态格式无效/);
   button(app.render(), '重试加载').props.onClick(); await settle();
   assert.match(content(app.render()), /timeout/);
   button(app.render(), '重试加载').props.onClick(); await settle();
   assert.ok(button(app.render(), '保存设置'));
-  assert.equal(app.calls.length, 3);
+  assert.equal(app.calls.length, 5);
 });
 
 test('auth import uses its own contract, clears JSON and preserves the model draft without exposing returned tokens', async () => {
   const secret = 'TOP-SECRET-TOKEN';
-  const app = harness([{ value: payload() }, { value: { configured: true, token: secret } },
+  const app = mounted([{ value: payload() }, { value: { configured: true, token: secret } },
+    { value: { ...payload(), auth: { configured: true }, token: secret } },
     { value: { ...payload(), auth: { configured: true }, token: secret } }]);
   app.render(); await settle();
   assert.match(content(app.render()), /积分查询凭据：未配置/);
@@ -291,10 +307,11 @@ test('auth import uses its own contract, clears JSON and preserves the model dra
   button(app.render(), '导入登录信息').props.onClick();
   await settle();
   const tree = app.render();
-  assert.equal(app.calls.length, 3);
-  assert.equal(app.calls[1]!.url, '/plugins/codebuddy-link/auth/import');
-  assert.deepEqual(JSON.parse(app.calls[1]!.init.body), { content: JSON.stringify({ token: secret }) });
-  assert.equal(app.calls[2]!.url, '/plugins/codebuddy-link/status');
+  assert.equal(app.calls.length, 6);
+  assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/auth/import');
+  assert.deepEqual(JSON.parse(app.calls[3]!.init.body), { content: JSON.stringify({ token: secret }) });
+  assert.equal(app.calls[4]!.url, '/plugins/codebuddy-link/refresh');
+  assert.equal(app.calls[5]!.url, '/plugins/codebuddy-link/models');
   assert.equal(control(tree, '导入登录 JSON', 'textarea').props.value, '');
   assert.equal(control(tree, '权限模式', 'select').props.value, 'plan');
   assert.match(content(tree), /积分查询凭据：已配置/);
@@ -308,25 +325,26 @@ const startReply = (verificationUri = 'https://www.codebuddy.cn/oauth/authorize?
 });
 
 test('OAuth starts only on click, links safely, checks manually and refreshes on success', async () => {
-  const app = harness([{ value: payload() }, { value: startReply() }, { value: { status: 'pending', interval: 2 } },
-    { value: { status: 'ok', token: 'SHOULD-NOT-RENDER' } }, { value: { ...payload(), auth: { configured: true } } }]);
+  const app = mounted([{ value: payload() }, { value: startReply() }, { value: { status: 'pending', interval: 2 } },
+    { value: { status: 'ok', token: 'SHOULD-NOT-RENDER' } }, { value: { ...payload(), auth: { configured: true } } },
+    { value: { ...payload(), auth: { configured: true } } }]);
   app.render(); await settle();
   control(app.render(), '导入登录 JSON', 'textarea').props.onChange({ target: { value: '{"token":"draft-secret"}' } });
   control(app.render(), '权限模式', 'select').props.onChange({ target: { value: 'plan' } });
-  assert.equal(app.calls.length, 1);
+  assert.equal(app.calls.length, 3);
   button(app.render(), '使用 OAuth 登录').props.onClick(); await settle();
   let tree = app.render();
   const link = nodes(tree).find(node => node.type === 'a')!;
   assert.equal(link.props.href, startReply().verificationUri);
   assert.equal(link.props.target, '_blank');
   assert.equal(link.props.rel, 'noopener noreferrer');
-  assert.equal(app.calls[1]!.init.body, '{}');
+  assert.equal(app.calls[3]!.init.body, '{}');
   assert.doesNotMatch(content(tree), /SHOULD-NOT-RENDER|private-flow-id/);
   app.render(); await settle();
-  assert.equal(app.calls.length, 2);
+  assert.equal(app.calls.length, 4);
   button(tree, '检查登录结果').props.onClick(); await settle();
   assert.match(content(app.render()), /尚未完成登录/);
-  assert.deepEqual(JSON.parse(app.calls[2]!.init.body), { flowId: 'private-flow-id' });
+  assert.deepEqual(JSON.parse(app.calls[4]!.init.body), { flowId: 'private-flow-id' });
   button(app.render(), '检查登录结果').props.onClick(); await settle();
   tree = app.render();
   assert.equal(control(tree, '导入登录 JSON', 'textarea').props.value, '');
@@ -334,12 +352,13 @@ test('OAuth starts only on click, links safely, checks manually and refreshes on
   assert.equal(nodes(tree).filter(node => node.type === 'a').length, 0);
   assert.match(content(tree), /积分查询凭据：已配置/);
   assert.doesNotMatch(JSON.stringify(tree), /SHOULD-NOT-RENDER|draft-secret/);
-  assert.equal(app.calls.length, 5);
+  assert.equal(app.calls.length, 8);
+  assert.deepEqual(app.calls.slice(-2).map(call => call.url), ['/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/models']);
 });
 
 test('cancel clears pasted JSON without clearing existing credentials; explicit clear refreshes status', async () => {
   const configured = { ...payload(), auth: { configured: true } };
-  const app = harness([{ value: configured }, { value: startReply() }, { value: { status: 'cancelled' } },
+  const app = mounted([{ value: configured }, { value: startReply() }, { value: { status: 'cancelled' } },
     { value: { configured: false } }, { value: payload() }]);
   app.render(); await settle();
   control(app.render(), '导入登录 JSON', 'textarea').props.onChange({ target: { value: '{"token":"secret"}' } });
@@ -347,19 +366,19 @@ test('cancel clears pasted JSON without clearing existing credentials; explicit 
   button(app.render(), '取消登录').props.onClick(); await settle();
   assert.equal(control(app.render(), '导入登录 JSON', 'textarea').props.value, '');
   assert.match(content(app.render()), /积分查询凭据：已配置/);
-  assert.equal(app.calls[2]!.url, '/plugins/codebuddy-link/auth/cancel');
-  assert.deepEqual(JSON.parse(app.calls[2]!.init.body), { flowId: 'private-flow-id' });
-  assert.equal(app.calls.length, 3);
+  assert.equal(app.calls[4]!.url, '/plugins/codebuddy-link/auth/cancel');
+  assert.deepEqual(JSON.parse(app.calls[4]!.init.body), { flowId: 'private-flow-id' });
+  assert.equal(app.calls.length, 5);
   button(app.render(), '清除积分查询凭据').props.onClick(); await settle();
-  assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/auth/clear');
-  assert.equal(app.calls[3]!.init.body, '{}');
+  assert.equal(app.calls[5]!.url, '/plugins/codebuddy-link/auth/clear');
+  assert.equal(app.calls[5]!.init.body, '{}');
   assert.match(content(app.render()), /积分查询凭据：未配置/);
 });
 
 test('unsafe OAuth URLs never become links', async () => {
   for (const url of ['http://www.codebuddy.cn/auth', 'https://www.codebuddy.cn.evil.test/', 'javascript:alert(1)',
     'https://evil.test/', 'https://user:pass@www.codebuddy.cn/', 'https://www.codebuddy.cn:444/']) {
-    const app = harness([{ value: payload() }, { value: startReply(url) }]);
+    const app = mounted([{ value: payload() }, { value: startReply(url) }]);
     app.render(); await settle();
     button(app.render(), '使用 OAuth 登录').props.onClick(); await settle();
     assert.equal(nodes(app.render()).filter(node => node.type === 'a').length, 0, url);
@@ -368,7 +387,7 @@ test('unsafe OAuth URLs never become links', async () => {
 });
 
 test('auth failures do not expose server tokens, discard JSON or reset drafts; cancelled import clears JSON', async () => {
-  const app = harness([{ value: { ...payload(), auth: { configured: 'invalid' } } },
+  const app = mounted([{ value: { ...payload(), auth: { configured: 'invalid' } } },
     { ok: false, status: 400, value: { error: 'SENSITIVE'.repeat(100) } },
     { error: new Error('SENSITIVE network data') }, { value: { token: 'SENSITIVE' } }]);
   app.render(); await settle();
@@ -383,11 +402,11 @@ test('auth failures do not expose server tokens, discard JSON or reset drafts; c
   }
   button(app.render(), '取消导入').props.onClick();
   assert.equal(control(app.render(), '导入登录 JSON', 'textarea').props.value, '');
-  assert.equal(app.calls.length, 4);
+  assert.equal(app.calls.length, 6);
 });
 
 test('successful auth clears JSON even when its status refresh fails', async () => {
-  const app = harness([{ value: payload() }, { value: { configured: true } }, { error: new Error('SENSITIVE') }]);
+  const app = mounted([{ value: payload() }, { value: { configured: true } }, { error: new Error('SENSITIVE') }]);
   app.render(); await settle();
   control(app.render(), '导入登录 JSON', 'textarea').props.onChange({ target: { value: '{}' } });
   button(app.render(), '导入登录信息').props.onClick(); await settle();
@@ -397,7 +416,7 @@ test('successful auth clears JSON even when its status refresh fails', async () 
 });
 
 test('runtime controls default for legacy payloads, validate ranges and serialize settings', async () => {
-  const app = harness([{value:payload()}, {value:payload()}]); app.render(); await settle();
+  const app = mounted([{value:payload()}, {value:payload()}]); app.render(); await settle();
   assert.equal(control(app.render(), '默认推理强度', 'select').props.value, 'auto');
   assert.equal(control(app.render(), '最大并发数', 'input').props.value, 2);
   control(app.render(), '默认推理强度', 'select').props.onChange({target:{value:'ultracode'}});
@@ -410,7 +429,7 @@ test('runtime controls default for legacy payloads, validate ranges and serializ
   control(app.render(), '无进展提醒（毫秒，0 关闭）', 'input').props.onChange({target:{value:'0'}});
   assert.equal(button(app.render(), '保存设置').props.disabled, false);
   button(app.render(), '保存设置').props.onClick(); await settle();
-  const config = JSON.parse(app.calls[1]!.init.body);
+  const config = JSON.parse(app.calls[3]!.init.body);
   assert.equal(config.reasoningEffort, 'ultracode'); assert.equal(config.maxConcurrency, 16);
   assert.equal(config.queueTimeoutMs, 1); assert.equal(config.stallWarnMs, 0);
 });
@@ -419,59 +438,205 @@ test('runs display honest metadata, zero costs and unknown values while ignoring
   const run = {id:'run', source:'model', state:'waiting', requestedModel:'requested-id', requestedEffort:'high', queuedAt:100,
     contextWindow:128000, contextSource:'fallback', contextOverrideSent:false, reasoningConfirmed:false, warning:true, queuePosition:0,
     totalCostUsd:0, prompt:'PRIVATE-PROMPT', rawOutput:'PRIVATE-OUTPUT', error:'PRIVATE-ERROR', path:'PRIVATE-PATH'};
-  const app = harness([{value:{...payload(), runs:[run, {...run, id:'done', state:'completed', returnedModel:'returned-id', totalCredits:0, totalCostUsd:undefined}, {...run, id:'unsafe-url', requestedModel:'C:/Users/PRIVATE-PATH', returnedModel:'https://host/PRIVATE-TOKEN'}, {id:'invalid'}]}}]);
+  const app = mounted([{value:{...payload(), runs:[run, {...run, id:'done', state:'completed', returnedModel:'returned-id', totalCredits:0, totalCostUsd:undefined}, {...run, id:'unsafe-url', requestedModel:'C:/Users/PRIVATE-PATH', returnedModel:'https://host/PRIVATE-TOKEN'}, {id:'invalid'}]}}]);
   app.render(); await settle(); const shown = content(app.render());
   assert.match(shown, /请求模型：requested-id；返回模型：未知/);
   assert.match(shown, /返回模型：returned-id/); assert.match(shown, /请求推理强度：high（服务端未确认）/);
   assert.match(shown, /DSH 上下文预算：128000.*回退配置.*未向 CLI 覆盖/);
   assert.match(shown, /积分：未知；费用（USD）：0\.00/); assert.match(shown, /积分：0\.00；费用（USD）：未知/);
-  assert.match(shown, /长时间无进展/); assert.match(shown, /当前进程内存.*50.*2 秒/);
+  assert.match(shown, /长时间无进展/); assert.match(shown, /当前进程内存.*5.*2 秒/);
   assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/); assert.doesNotMatch(shown, /·/);
 });
 
-test('runs prioritize old nonterminal calls over newer history with matching caps and privacy', async () => {
+test('runs show latest five total by queuedAt below Save, without active-first exceptions or private fields', async () => {
   const raw = {source:'model', requestedModel:'requested', requestedEffort:'high',
     contextOverrideSent:true, reasoningConfirmed:true, warning:true, queuePosition:0,
     prompt:'PRIVATE-PROMPT', rawOutput:'PRIVATE-OUTPUT', error:'PRIVATE-ERROR', path:'PRIVATE-PATH', token:'PRIVATE-TOKEN'};
   const terminal = Array.from({length:55}, (_, i) => ({...raw, id:`terminal-${i}`, state:['completed','failed','cancelled'][i % 3], queuedAt:1000 - i}));
   const live = Array.from({length:85}, (_, i) => ({...raw, id:`live-${i}`, state:['waiting','responding','starting','queued'][i % 4], queuedAt:100 - i}));
   for (const count of [4, 85]) {
-    const app = harness([{value:{...payload(), runs:[null, {id:'invalid'}, ...terminal, ...live.slice(0, count)]}}]);
+    const app = mounted([{value:{...payload(), runs:[null, {id:'invalid'}, ...live.slice(0, count), ...terminal.toReversed()]}}]);
     app.render(); await settle(); const tree = app.render();
     const articles = nodes(tree).filter(node => node.type === 'article');
-    assert.deepEqual(articles.map(node => node.props.key), [...live.slice(0, Math.min(count, 80)), ...terminal.slice(0, 50)].map(run => run.id));
-    assert.equal(articles.length, Math.min(count, 80) + 50);
-    assert.match(content(articles[0]), /等待响应.*长时间无进展/);
-    assert.match(content(tree), /优先显示未结束调用（最多 80 条）.*最近 50 条已结束记录.*合计最多 130 条/);
+    assert.deepEqual(articles.map(node => node.props.key), terminal.slice(0, 5).map(run => run.id));
+    assert.equal(articles.length, 5);
+    assert.match(content(tree), /最近 5 条运行记录.*合计最多 5 条/);
+    const history = nodes(tree).find(node => node.props['aria-label'] === '运行记录')!;
+    assert.equal(tree.children.at(-1), history);
+    assert.ok(nodes(tree).indexOf(button(tree, '保存设置')) < nodes(tree).indexOf(history));
     assert.ok(app.state[0].runs.every((run: any) => run.contextOverrideSent === false && run.reasoningConfirmed === false));
     assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/);
     assert.doesNotMatch(JSON.stringify(tree), /PRIVATE-/);
   }
 });
 
+test('latest-five cap includes mixed live and finished runs in recency order', async () => {
+  const runs = ['completed', 'queued', 'failed', 'responding', 'waiting', 'starting', 'cancelled'].map((state, i) => ({
+    id:`run-${i}`, source:'ask', requestedModel:'basic', requestedEffort:'auto', state, queuedAt:i,
+  }));
+  const app = mounted([{value:{...payload(), runs}}]); app.render(); await settle();
+  assert.deepEqual(nodes(app.render()).filter(node => node.type === 'article').map(node => node.props.key), ['run-6', 'run-5', 'run-4', 'run-3', 'run-2']);
+});
+
 test('two-second status polling preserves drafts, coalesces loads and ignores late results after unmount', async () => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
-  const app = harness([{value:payload()}, {value:{...payload(), config:{...payload().config, permissionMode:'acceptEdits'}}, wait}]);
+  const app = mounted([{value:payload()}, {value:{...payload(), config:{...payload().config, permissionMode:'acceptEdits'}}, wait}]);
   app.render(); await settle();
   control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
   app.tick(); app.tick(); button(app.render(), '刷新账户').props.onClick();
-  assert.equal(app.calls.length, 2); assert.equal(app.calls[1]!.url, '/plugins/codebuddy-link/status');
+  assert.equal(app.calls.length, 4); assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/status');
   release(); await settle(); assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
-  app.cleanup.forEach(dispose => dispose()); app.tick(); assert.equal(app.calls.length, 2);
+  app.cleanup.forEach(dispose => dispose()); app.tick(); assert.equal(app.calls.length, 4);
 
   let finish!: () => void; const gate = new Promise<void>(resolve => {finish = resolve;});
-  const late = harness([{value:payload()}, {value:{...payload(), account:{status:'ok', remaining:123}}, wait:gate}]);
+  const late = mounted([{value:payload()}, {value:{...payload(), account:{status:'ok', remaining:123}}, wait:gate}]);
   late.render(); await settle(); late.tick(); const before = late.state[0];
   late.cleanup.forEach(dispose => dispose()); finish(); await settle(); assert.equal(late.state[0], before);
 });
 
 test('runtime polling and auth requests never overlap or poll OAuth automatically', async () => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
-  const app = harness([{value:payload()}, {value:startReply(), wait}, {value:payload()}]);
+  const app = mounted([{value:payload()}, {value:startReply(), wait}, {value:payload()}]);
   app.render(); await settle(); button(app.render(), '使用 OAuth 登录').props.onClick();
-  app.tick(); assert.equal(app.calls.length, 2);
+  app.tick(); assert.equal(app.calls.length, 4);
   release(); await settle(); app.tick(); await settle();
-  assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/auth/start', '/plugins/codebuddy-link/status']);
+  assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/models', '/plugins/codebuddy-link/auth/start', '/plugins/codebuddy-link/status']);
+});
+
+test('mount serializes status, account and models, blocks overlaps, and preserves drafts throughout', async () => {
+  const gates = Array.from({length:3}, () => {
+    let release!: () => void;
+    return {wait:new Promise<void>(resolve => {release = resolve;}), release:() => release()};
+  });
+  const discovered = {...payload(), config:{...payload().config, permissionMode:'acceptEdits'}, catalogModels:[{id:'found', name:'Found'}]};
+  const app = harness([{value:payload(), wait:gates[0]!.wait}, {value:payload(), wait:gates[1]!.wait},
+    {value:discovered, wait:gates[2]!.wait}, {value:discovered}, {value:discovered}]);
+  app.render(); app.tick();
+  assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status']);
+  gates[0]!.release(); await settle();
+  assert.equal(app.calls.length, 2);
+  assert.equal(app.calls[1]!.url, '/plugins/codebuddy-link/refresh');
+  control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+  app.tick(); button(app.render(), '刷新账户').props.onClick(); button(app.render(), '使用 OAuth 登录').props.onClick();
+  assert.equal(app.calls.length, 2);
+  gates[1]!.release(); await settle();
+  assert.equal(app.calls[2]!.url, '/plugins/codebuddy-link/models');
+  app.tick(); button(app.render(), '获取模型列表').props.onClick();
+  assert.equal(app.calls.length, 3);
+  gates[2]!.release(); await settle();
+  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+  assert.match(content(app.render()), /Found/);
+  app.tick(); await settle(); app.tick(); await settle();
+  assert.deepEqual(app.calls.slice(3).map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/status']);
+  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+});
+
+test('invalid refreshed accounts never request models on mount or manual refresh', async () => {
+  for (const status of ['auth-required', 'unavailable', 'error']) {
+    const invalid = {...payload(), account:{status}};
+    const app = harness([{value:payload()}, {value:invalid}, {value:invalid}]);
+    app.render(); await settle();
+    assert.equal(app.calls.length, 2);
+    control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+    button(app.render(), '刷新账户').props.onClick(); await settle();
+    assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/refresh']);
+    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+    assert.equal(button(app.render(), '刷新账户').props.disabled, false);
+  }
+});
+
+test('mount refresh errors remain visible and polling does not retry external services', async () => {
+  for (const failedStage of ['refresh', 'models']) {
+    const replies: Reply[] = [{value:payload()}];
+    if (failedStage === 'models') replies.push({value:{...payload(), account:{status:'ok', remaining:12}}});
+    replies.push({ok:false, status:503}, {value:payload()});
+    const app = harness(replies); app.render(); await settle();
+    assert.match(content(app.render()), /HTTP 503/);
+    assert.equal(app.calls.at(-1)!.url, `/plugins/codebuddy-link/${failedStage}`);
+    assert.equal(button(app.render(), '保存设置').props.disabled, false);
+    if (failedStage === 'models') assert.match(content(app.render()), /剩余：12\.00/);
+    control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+    app.tick(); await settle();
+    assert.equal(app.calls.at(-1)!.url, '/plugins/codebuddy-link/status');
+    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+    assert.match(content(app.render()), /HTTP 503/);
+  }
+});
+
+test('manual model follow-up errors preserve drafts and do not report refresh success', async () => {
+  const app = mounted([{value:payload()}, {value:payload()}, {ok:false, status:502}]);
+  app.render(); await settle();
+  control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+  button(app.render(), '刷新账户').props.onClick(); await settle();
+  assert.deepEqual(app.calls.slice(-2).map(call => call.url), ['/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/models']);
+  assert.match(content(app.render()), /HTTP 502/);
+  assert.doesNotMatch(content(app.render()), /账户状态已刷新/);
+  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+});
+
+test('unmount at each mount-chain stage ignores late responses and starts no follow-up', async () => {
+  for (const stage of [0, 1, 2]) {
+    let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
+    const app = harness(Array.from({length:3}, (_, index) => ({value:payload(), ...(index === stage ? {wait} : {})})));
+    app.render(); await settle();
+    assert.equal(app.calls.length, stage + 1);
+    app.cleanup.forEach(dispose => dispose()); const before = JSON.stringify(app.state);
+    release(); await settle();
+    assert.equal(JSON.stringify(app.state), before);
+    assert.equal(app.calls.length, stage + 1);
+    assert.equal(app.timers.size, 0);
+  }
+});
+
+test('stale mount generation cannot publish results, request models, or unlock the new mount', async () => {
+  let oldRelease!: () => void; const oldWait = new Promise<void>(resolve => {oldRelease = resolve;});
+  let newRelease!: () => void; const newWait = new Promise<void>(resolve => {newRelease = resolve;});
+  const app = harness([{value:payload()}, {value:{...payload(), account:{status:'ok', remaining:999}}, wait:oldWait},
+    {value:payload(), wait:newWait}, {value:{...payload(), account:{status:'auth-required'}}}]);
+  app.render(); await settle();
+  control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+  app.remount(); const before = JSON.stringify(app.state);
+  oldRelease(); await settle(); app.tick();
+  assert.equal(JSON.stringify(app.state), before);
+  assert.equal(app.calls.length, 3);
+  newRelease(); await settle();
+  assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/status', '/plugins/codebuddy-link/refresh']);
+  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+  assert.equal(app.timers.size, 1);
+});
+
+test('auth model follow-up failure is private and invalid post-login accounts skip models', async () => {
+  for (const status of ['ok', 'auth-required']) {
+    const app = mounted([{value:payload()}, {value:{configured:true}}, {value:{...payload(), account:{status}}},
+      {error:new Error('PRIVATE-AUTH-RESPONSE')}]);
+    app.render(); await settle();
+    control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+    control(app.render(), '导入登录 JSON', 'textarea').props.onChange({target:{value:'{}'}});
+    button(app.render(), '导入登录信息').props.onClick(); await settle();
+    assert.equal(app.calls.length, status === 'ok' ? 6 : 5);
+    assert.equal(control(app.render(), '导入登录 JSON', 'textarea').props.value, '');
+    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+    if (status === 'ok') assert.match(content(app.render()), /状态刷新失败/);
+    assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-AUTH/);
+  }
+});
+
+test('auth refresh chain keeps its lock and ignores each late follow-up after unmount', async () => {
+  for (const stage of ['refresh', 'models']) {
+    let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
+    const app = mounted([{value:payload()}, {value:{configured:true}},
+      {value:payload(), ...(stage === 'refresh' ? {wait} : {})}, {value:payload(), ...(stage === 'models' ? {wait} : {})}]);
+    app.render(); await settle();
+    control(app.render(), '导入登录 JSON', 'textarea').props.onChange({target:{value:'{}'}});
+    button(app.render(), '导入登录信息').props.onClick(); await settle();
+    const count = stage === 'refresh' ? 5 : 6;
+    app.tick(); button(app.render(), '刷新账户').props.onClick(); button(app.render(), '保存设置').props.onClick();
+    assert.equal(app.calls.length, count);
+    app.cleanup.forEach(dispose => dispose()); const before = JSON.stringify(app.state);
+    release(); await settle();
+    assert.equal(JSON.stringify(app.state), before);
+    assert.equal(app.calls.length, count);
+  }
 });
 
 test('unmounted request cannot update state; client uses no DOM APIs and clears polling', async () => {

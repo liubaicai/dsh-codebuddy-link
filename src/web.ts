@@ -107,8 +107,7 @@ export function registerSettingsRoutes(server: WebServerLike, store: SettingsSto
 // A runtime snapshot is deliberately a metadata-only boundary, never a raw runner object.
 function publicRuns(values: unknown[]): Record<string, unknown>[] {
   if (!Array.isArray(values)) return []
-  const nonterminal: Record<string, unknown>[] = []
-  const terminal: Record<string, unknown>[] = []
+  const recent: Record<string, unknown>[] = []
   for (const value of values) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) continue
     const run = value as Record<string, unknown>
@@ -126,13 +125,11 @@ function publicRuns(values: unknown[]): Record<string, unknown>[] {
       if (typeof run[key] === 'number' && Number.isFinite(run[key]) && run[key] >= 0) clean[key] = run[key]
     }
     if (['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(run.failure))) clean.failure = run.failure
-    // Snapshots arrive newest first; terminal history must never crowd out live calls.
-    if (['completed', 'failed', 'cancelled'].includes(String(clean.state))) {
-      if (terminal.length < 50) terminal.push(clean)
-    } else if (nonterminal.length < 80) nonterminal.push(clean)
-    if (nonterminal.length === 80 && terminal.length === 50) break
+    recent.push(clean)
+    recent.sort((a, b) => Number(b.queuedAt) - Number(a.queuedAt))
+    if (recent.length > 5) recent.pop()
   }
-  return [...nonterminal, ...terminal]
+  return recent
 }
 function sameHost(origin: string, host: string | undefined): boolean {
   try { const url = new URL(origin); return ['http:','https:'].includes(url.protocol) && url.host === host } catch { return false }

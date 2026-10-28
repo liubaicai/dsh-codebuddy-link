@@ -59,8 +59,7 @@ function isModelIdentifier(value) {
 function parseRuns(value) {
     if (!Array.isArray(value))
         return [];
-    const nonterminal = [];
-    const terminal = [];
+    const runs = [];
     for (const entry of value) {
         if (!isRecord(entry) || typeof entry.id !== 'string' || !['model', 'ask'].includes(String(entry.source))
             || !['queued', 'starting', 'waiting', 'responding', 'completed', 'failed', 'cancelled'].includes(String(entry.state))
@@ -81,17 +80,10 @@ function parseRuns(value) {
         }
         if (['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(entry.failure)))
             run.failure = entry.failure;
-        // Mirror the server cap without letting newer terminal history hide live calls.
-        if (['completed', 'failed', 'cancelled'].includes(run.state)) {
-            if (terminal.length < 50)
-                terminal.push(run);
-        }
-        else if (nonterminal.length < 80)
-            nonterminal.push(run);
-        if (nonterminal.length === 80 && terminal.length === 50)
-            break;
+        runs.push(run);
     }
-    return [...nonterminal, ...terminal];
+    // Latest five total, regardless of state or server ordering; retain only sanitized fields.
+    return runs.sort((a, b) => b.queuedAt - a.queuedAt).slice(0, 5);
 }
 function officialVerificationUri(value) {
     if (typeof value !== 'string')
@@ -191,6 +183,19 @@ function SettingsPanel() {
     const [authNotice, setAuthNotice] = useState('');
     const authPending = useRef(false);
     const authSequence = useRef(0);
+    // The caller holds its in-flight lock for the entire chain. Check its generation
+    // after each await, before updating state or starting another external request.
+    async function refreshAccount(current) {
+        const account = await request('refresh', {});
+        if (!current())
+            return;
+        setStatus(account);
+        if (account.account.status !== 'ok')
+            return;
+        const models = await request('models', {});
+        if (current())
+            setStatus(models);
+    }
     async function authenticate(action) {
         if (!active.current || authPending.current || pending.current || !status)
             return;
@@ -228,9 +233,14 @@ function SettingsPanel() {
                         ? { ...previous, auth: { configured: result.configured } } : previous);
                 // Deliberately bypass load(): a successful login must not replace the model draft.
                 try {
-                    const refreshed = await request('status');
-                    if (current())
-                        setStatus(refreshed);
+                    if (action === 'clear') {
+                        const refreshed = await request('status');
+                        if (current())
+                            setStatus(refreshed);
+                    }
+                    else {
+                        await refreshAccount(current);
+                    }
                 }
                 catch {
                     if (current())
@@ -260,20 +270,28 @@ function SettingsPanel() {
             setError('');
             setNotice('');
         }
+        const current = () => active.current && ticket === sequence.current;
         try {
-            const result = await request(action, action === 'status' ? undefined : (action === 'refresh' || action === 'models') ? {} : {
-                permissionMode: config.permissionMode, models: config.models, hiddenModels: config.hiddenModels,
-                defaultModel: config.defaultModel, tools: config.tools, reasoningEffort: config.reasoningEffort,
-                maxConcurrency: config.maxConcurrency, queueTimeoutMs: config.queueTimeoutMs, stallWarnMs: config.stallWarnMs,
-            });
-            if (!active.current || ticket !== sequence.current)
+            if (action !== 'refresh') {
+                const endpoint = action === 'initial' ? 'status' : action;
+                const result = await request(endpoint, endpoint === 'status' ? undefined : endpoint === 'models' ? {} : {
+                    permissionMode: config.permissionMode, models: config.models, hiddenModels: config.hiddenModels,
+                    defaultModel: config.defaultModel, tools: config.tools, reasoningEffort: config.reasoningEffort,
+                    maxConcurrency: config.maxConcurrency, queueTimeoutMs: config.queueTimeoutMs, stallWarnMs: config.stallWarnMs,
+                });
+                if (!current())
+                    return;
+                setStatus(result);
+                // Only a successful save replaces an existing draft, never background discovery.
+                if (action === 'config')
+                    setDraft(result.config);
+                else
+                    setDraft(previous => previous ?? result.config);
+            }
+            if (action === 'initial' || action === 'refresh')
+                await refreshAccount(current);
+            if (!current())
                 return;
-            setStatus(result);
-            // Refreshing account information must not discard unsaved form edits.
-            if (action === 'config')
-                setDraft(result.config);
-            else if (action === 'status')
-                setDraft(previous => previous ?? result.config);
             if (!automatic)
                 setNotice(action === 'config' ? '设置已保存' : action === 'refresh' ? '账户状态已刷新' : '');
         }
@@ -291,7 +309,7 @@ function SettingsPanel() {
     }
     useEffect(() => {
         active.current = true;
-        void load('status');
+        void load('initial');
         const timer = setInterval(() => { void load('status', undefined, true); }, 2000);
         return () => { clearInterval(timer); active.current = false; ++sequence.current; ++authSequence.current; pending.current = false; authPending.current = false; };
     }, []);
@@ -310,7 +328,7 @@ function SettingsPanel() {
         && bounded(draft.queueTimeoutMs, 1, 2147483647) && bounded(draft.stallWarnMs, 0, 2147483647);
     const account = status?.account;
     const accountLabels = { ok: '可用', unavailable: '暂不可用', 'auth-required': '需要登录', error: '查询失败' };
-    return h('section', { 'aria-label': 'CodeBuddy 设置', style: { maxWidth: '760px', width: '100%', boxSizing: 'border-box', padding: '20px', fontSize: '13px', lineHeight: 1.5, color: 'var(--dsw-alias-label-primary, inherit)' } }, h('h2', null, 'CodeBuddy 设置'), h('p', null, status ? `插件状态：${status.config.enabled ? '已启用' : '未启用'}` : '正在读取插件状态'), h('div', { role: 'status', 'aria-live': 'polite' }, busy ? `${busy}…` : notice), error ? h('div', { role: 'alert', style: { margin: '12px 0' } }, error, !status ? h('button', { type: 'button', disabled: !!busy, onClick: () => void load('status') }, '重试加载') : null) : null, h('section', { style: { ...box, fontSize: '13px' }, 'aria-label': '账户登录' }, h('h3', null, '账户登录'), h('p', null, '用于积分与模型列表查询，不改变 CodeBuddy CLI 登录。'), h('p', null, `积分查询凭据：${status?.auth.configured ? '已配置' : '未配置'}`), h('div', { role: 'status', 'aria-live': 'polite' }, authBusy ? '登录操作中…' : authNotice), authError ? h('p', { role: 'alert' }, authError) : null, h('div', { style: row }, h('button', { type: 'button', style: authControl, disabled: !!busy || authBusy || !status || !!authFlow,
+    return h('section', { 'aria-label': 'CodeBuddy 设置', style: { maxWidth: '760px', width: '100%', boxSizing: 'border-box', padding: '20px', fontSize: '13px', lineHeight: 1.5, color: 'var(--dsw-alias-label-primary, inherit)' } }, h('h2', null, 'CodeBuddy 设置'), h('p', null, status ? `插件状态：${status.config.enabled ? '已启用' : '未启用'}` : '正在读取插件状态'), h('div', { role: 'status', 'aria-live': 'polite' }, busy ? `${busy}…` : notice), error ? h('div', { role: 'alert', style: { margin: '12px 0' } }, error, !status ? h('button', { type: 'button', disabled: !!busy, onClick: () => void load('initial') }, '重试加载') : null) : null, h('section', { style: { ...box, fontSize: '13px' }, 'aria-label': '账户登录' }, h('h3', null, '账户登录'), h('p', null, '用于积分与模型列表查询，不改变 CodeBuddy CLI 登录。'), h('p', null, `积分查询凭据：${status?.auth.configured ? '已配置' : '未配置'}`), h('div', { role: 'status', 'aria-live': 'polite' }, authBusy ? '登录操作中…' : authNotice), authError ? h('p', { role: 'alert' }, authError) : null, h('div', { style: row }, h('button', { type: 'button', style: authControl, disabled: !!busy || authBusy || !status || !!authFlow,
         onClick: () => void authenticate('start') }, '使用 OAuth 登录'), h('button', { type: 'button', style: authControl, disabled: !!busy || authBusy || !status?.auth.configured || !!authFlow,
         onClick: () => void authenticate('clear') }, '清除积分查询凭据')), authFlow ? h('div', null, authFlow.verificationUri ? h('a', { href: authFlow.verificationUri, target: '_blank', rel: 'noopener noreferrer', style: { fontSize: '13px' } }, '打开 CodeBuddy 官方授权页面')
         : h('p', { role: 'alert' }, '授权链接不安全，已禁止打开。请取消后重试。'), h('div', { style: row }, h('button', { type: 'button', style: authControl, disabled: authBusy || !!busy, onClick: () => void authenticate('poll') }, '检查登录结果'), h('button', { type: 'button', style: authControl, disabled: authBusy || !!busy, onClick: () => void authenticate('cancel') }, '取消登录'))) : null, h('label', { style: { ...field, marginTop: '14px' } }, '导入登录 JSON', h('textarea', { value: authContent, rows: 4, autoComplete: 'off', spellCheck: false,
@@ -318,7 +336,7 @@ function SettingsPanel() {
         placeholder: '粘贴登录 JSON，仅提交到本插件；成功或取消后清空',
         onChange: (event) => setAuthContent(event.target.value) })), h('div', { style: row }, h('button', { type: 'button', style: authControl, disabled: !!busy || authBusy || !status || !!authFlow || !authContent.trim(),
         onClick: () => void authenticate('import') }, '导入登录信息'), h('button', { type: 'button', style: authControl, disabled: authBusy || !!authFlow || !authContent,
-        onClick: () => { setAuthContent(''); setAuthError(''); setAuthNotice('已取消导入。'); } }, '取消导入'))), h('section', { style: box, 'aria-label': '账户积分' }, h('div', { style: row }, h('h3', { style: { margin: 0 } }, '账户与积分'), h('button', { type: 'button', disabled: !!busy || authBusy || !status, onClick: () => void load('refresh') }, '刷新账户')), h('p', null, `账户状态：${account ? accountLabels[account.status] : '未知'}`), account?.message ? h('p', null, text(account.message)) : null, h('div', { style: row }, h('span', null, `剩余：${amount(account?.remaining)}`), h('span', null, `总额：${amount(account?.total)}`), h('span', null, `已用：${amount(account?.used)}`)), h('p', null, `单位：${text(account?.unit)}；更新时间：${text(account?.updatedAt)}`), h('p', null, `来源：${text(account?.source)}`), h('p', null, '是否与 WorkBuddy 共享账户或积分，以接口返回为准。缺失字段显示“未知”，不推算余额。仅点击刷新账户时主动查询，不自动轮询。')), h('section', { style: box, 'aria-label': '运行记录' }, h('h3', null, '运行记录'), h('p', null, '仅当前进程内存，优先显示未结束调用（最多 80 条），另保留最近 50 条已结束记录，合计最多 130 条；此面板打开时每 2 秒刷新。不会保存提示词、原始输出或错误详情。'), h('div', { style: { maxHeight: '420px', overflowY: 'auto' } }, ...(status?.runs.length ? status.runs.map(renderRun) : [h('p', null, '暂无运行记录')]))), draft ? h('fieldset', { disabled: !!busy, style: { ...box, minWidth: 0 } }, h('legend', null, '模型与独立委派设置'), h('label', { style: field }, '权限模式', h('select', { value: draft.permissionMode, onChange: (event) => update({ permissionMode: event.target.value }) }, !validMode ? h('option', { value: draft.permissionMode, disabled: true }, `未知模式：${draft.permissionMode}`) : null, h('option', { value: 'dontAsk' }, 'dontAsk — 不询问'), h('option', { value: 'plan' }, 'plan — 规划模式'), h('option', { value: 'acceptEdits' }, 'acceptEdits — 接受编辑'))), h('p', null, '权限模式仅对独立委派 CodeBuddy 工具生效；provider 工具权限仍由 DSH 管理。'), h('div', { style: row }, h('h3', { style: { margin: 0 } }, '启用模型'), h('button', { type: 'button', disabled: !!busy || authBusy, onClick: () => void load('models') }, '获取模型列表')), h('p', null, status?.modelMessage || '获取列表后勾选模型，选择默认模型并保存。'), ...[...models].map(([id, label]) => h('label', { key: id, style: { display: 'block', marginBottom: '8px', overflowWrap: 'anywhere' } }, h('input', { type: 'checkbox', checked: enabledModels.includes(id),
+        onClick: () => { setAuthContent(''); setAuthError(''); setAuthNotice('已取消导入。'); } }, '取消导入'))), h('section', { style: box, 'aria-label': '账户积分' }, h('div', { style: row }, h('h3', { style: { margin: 0 } }, '账户与积分'), h('button', { type: 'button', disabled: !!busy || authBusy || !status, onClick: () => void load('refresh') }, '刷新账户')), h('p', null, `账户状态：${account ? accountLabels[account.status] : '未知'}`), account?.message ? h('p', null, text(account.message)) : null, h('div', { style: row }, h('span', null, `剩余：${amount(account?.remaining)}`), h('span', null, `总额：${amount(account?.total)}`), h('span', null, `已用：${amount(account?.used)}`)), h('p', null, `单位：${text(account?.unit)}；更新时间：${text(account?.updatedAt)}`), h('p', null, `来源：${text(account?.source)}`), h('p', null, '是否与 WorkBuddy 共享账户或积分，以接口返回为准。缺失字段显示“未知”，不推算余额。进入设置、手动刷新或登录成功后查询账户；账户可用时自动获取模型列表，不自动轮询外部服务。')), draft ? h('fieldset', { disabled: !!busy, style: { ...box, minWidth: 0 } }, h('legend', null, '模型与独立委派设置'), h('label', { style: field }, '权限模式', h('select', { value: draft.permissionMode, onChange: (event) => update({ permissionMode: event.target.value }) }, !validMode ? h('option', { value: draft.permissionMode, disabled: true }, `未知模式：${draft.permissionMode}`) : null, h('option', { value: 'dontAsk' }, 'dontAsk — 不询问'), h('option', { value: 'plan' }, 'plan — 规划模式'), h('option', { value: 'acceptEdits' }, 'acceptEdits — 接受编辑'))), h('p', null, '权限模式仅对独立委派 CodeBuddy 工具生效；provider 工具权限仍由 DSH 管理。'), h('div', { style: row }, h('h3', { style: { margin: 0 } }, '启用模型'), h('button', { type: 'button', disabled: !!busy || authBusy, onClick: () => void load('models') }, '获取模型列表')), h('p', null, status?.modelMessage || '获取列表后勾选模型，选择默认模型并保存。'), ...[...models].map(([id, label]) => h('label', { key: id, style: { display: 'block', marginBottom: '8px', overflowWrap: 'anywhere' } }, h('input', { type: 'checkbox', checked: enabledModels.includes(id),
         onChange: (event) => update({
             models: event.target.checked ? [...new Set([...draft.models, id])] : draft.models,
             hiddenModels: event.target.checked ? draft.hiddenModels.filter(hidden => hidden !== id) : [...new Set([...draft.hiddenModels, id])],
@@ -337,7 +355,7 @@ function SettingsPanel() {
         ['stallWarnMs', '无进展提醒（毫秒，0 关闭）', 0, 2147483647],
     ].map(([key, label, min, max]) => h('label', { key, style: field }, label, h('input', { type: 'number', min, max, step: 1, value: Number.isNaN(draft[key]) ? '' : draft[key],
         onChange: (event) => update({ [key]: event.target.value.trim() === '' ? NaN : Number(event.target.value) }) }))), h('p', { role: 'note', style: { color: 'var(--dsw-alias-label-primary, inherit)', background: 'var(--dsw-alias-bg-layer-1, transparent)', border: '0.5px solid var(--dsw-alias-border-l2, rgba(128,128,128,0.35))', padding: '12px', borderRadius: '6px' } }, '警告：独立委派工具启用后不受DSH文件沙箱约束，默认留空。'), h('label', { style: field }, '独立委派工具配置（tools）', h('input', { type: 'text', value: draft.tools,
-        onChange: (event) => update({ tools: event.target.value }) })), !validDefault || !validMode ? h('p', { role: 'alert' }, '请选择有效的权限模式与已启用的默认模型。') : null, !validRuntime ? h('p', { role: 'alert' }, '请检查推理强度、并发数与等待时间范围；时间必须为整数。') : null, h('button', { type: 'button', disabled: !!busy || authBusy || !validDefault || !validMode || !validRuntime, onClick: () => void load('config', draft) }, '保存设置')) : null);
+        onChange: (event) => update({ tools: event.target.value }) })), !validDefault || !validMode ? h('p', { role: 'alert' }, '请选择有效的权限模式与已启用的默认模型。') : null, !validRuntime ? h('p', { role: 'alert' }, '请检查推理强度、并发数与等待时间范围；时间必须为整数。') : null, h('button', { type: 'button', disabled: !!busy || authBusy || !validDefault || !validMode || !validRuntime, onClick: () => void load('config', draft) }, '保存设置')) : null, h('section', { style: box, 'aria-label': '运行记录' }, h('h3', null, '运行记录'), h('p', null, '仅当前进程内存，按入队时间显示最近 5 条运行记录（包括进行中与已结束调用，合计最多 5 条）；此面板打开时每 2 秒刷新状态。不会保存提示词、原始输出或错误详情。'), h('div', { style: { maxHeight: '420px', overflowY: 'auto' } }, ...(status?.runs.length ? status.runs.map(renderRun) : [h('p', null, '暂无运行记录')]))));
 }
 function apply(ctx) {
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'codebuddy-link', order: 20, label: 'CodeBuddy' }, SettingsPanel));
