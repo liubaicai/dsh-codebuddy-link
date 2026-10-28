@@ -31,7 +31,7 @@ function documents(input: string, allowFence = true): unknown[] {
       const opening = /^```(?:json|jsonc|jsonl|ndjson)?[ \t]*\r?\n/i.exec(input.slice(i))
       if (!opening) fail('unsupported or incomplete JSON fence')
       const start = i + opening![0].length
-      const ending = /^[ \t]*```[ \t]*(?=\r?$)/m.exec(input.slice(start))
+      const ending = /(?:^|\n)[ \t]*```[ \t]*(?=\r?(?:\n|$))/.exec(input.slice(start))
       if (!ending) fail('unclosed JSON fence')
       const inner = input.slice(start, start + ending!.index)
       // Opening fences inside JSON strings are opaque. At document boundaries
@@ -112,7 +112,14 @@ class Normalizer {
     const argumentKey = one(o, ['arguments','args','input','parameters'])
     if (!argumentKey) fail('missing tool arguments')
     const source = o[argumentKey!]
-    const args = typeof source === 'string' ? strictJson(source) : source
+    let args: unknown = source
+    if (typeof source === 'string') {
+      try { args = strictJson(source) }
+      catch (error) {
+        const detail = error instanceof Error ? error.message.replace(/^Invalid CodeBuddy response envelope: /, '') : 'malformed JSON'
+        fail(`tool call #${this.calls.length + 1} arguments: ${detail}`)
+      }
+    }
     if (!object(args)) fail('tool arguments must be a JSON object')
     // In-memory structuredOutput must be JSON data too: no toJSON hooks,
     // undefined, non-finite numbers, sparse arrays, cycles or class instances.

@@ -9,6 +9,33 @@ import { runCodeBuddy } from './runner.ts'
 
 export type Runner = typeof runCodeBuddy
 
+/** Display only model output, never prompts, credentials, stderr or raw transport events.
+ * A longer-than-content Markdown fence prevents model-supplied fences/HTML from
+ * turning this diagnostic into rendered instructions. Failure remains terminal. */
+function failedResponseText(resultText: string, streamedText: string, structuredOutput: unknown): string {
+  const sections: string[] = ['CodeBuddy 响应解析失败。本次未执行任何工具调用。以下是完整原始回复，仅供排查；分享前请检查敏感信息。']
+  const fence = (label: string, value: string) => {
+    let length = 3
+    for (const match of value.matchAll(/`+/g)) length = Math.max(length, match[0].length + 1)
+    const marker = '`'.repeat(length)
+    sections.push(`${label}\n\n${marker}text\n${value}\n${marker}`)
+  }
+  const body = resultText || streamedText
+  if (body) fence('原始回复', body)
+  if (structuredOutput !== undefined && structuredOutput !== null) {
+    // structured_output is already decoded by NDJSON; show a lossless JSON
+    // representation of that value, not a claimed copy of transport bytes.
+    try {
+      const serialized = typeof structuredOutput === 'string' ? structuredOutput : JSON.stringify(structuredOutput, null, 2)
+      if (serialized !== undefined && serialized !== body) fence('结构化返回值（解析输入）', serialized)
+    } catch {
+      sections.push('结构化返回值无法序列化；保留原解析错误。')
+    }
+  }
+  if (!body && structuredOutput == null) sections.push('原始回复为空。')
+  return sections.join('\n\n')
+}
+
 export { CODEBUDDY_EFFORTS, type CodeBuddyEffort } from './config.ts';
 const EFFORT_LABELS: Record<CodeBuddyEffort, string> = { auto: 'CLI 默认', minimal: '极简', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最大', ultracode: 'ultracode' };
 export class CodeBuddyAdapter extends LlmAdapter {
@@ -60,6 +87,11 @@ export class CodeBuddyAdapter extends LlmAdapter {
     let structuredOutput: unknown
     let usage: TokenUsage | undefined
     let sessionId: string | undefined
+    let parseFailed = false
+    const parse = (value: unknown) => {
+      try { return parseResponse(value, tools) }
+      catch (error) { parseFailed = true; throw error }
+    }
     const close = (): StreamChunk[] => {
       if (!open) return []
       const chunk: StreamChunk = { type: 'block-end', index, block: { type: open, text: accumulated } }
@@ -89,7 +121,10 @@ export class CodeBuddyAdapter extends LlmAdapter {
         effort: resolveEffort(options.reasoningEffort, cfg.reasoningEffort), permissionMode: 'dontAsk', tools: '',
         timeoutMs: cfg.timeoutMs, signal: options.signal, authToken: await this.resolveAuthToken(),
       }, 'model', this.runner, structured ? event => {
-        parseResponse(event.structuredOutput ?? (event.text || rawText), tools)
+        // Validation runs before the runtime yields result: retain the exact
+        // parse input first so failed validation cannot hide the final reply.
+        resultText = event.text; structuredOutput = event.structuredOutput
+        parse(structuredOutput ?? (resultText || rawText))
       } : undefined)) {
         if (event.type === 'text') {
           rawText += event.delta
@@ -99,7 +134,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
         else if (event.type === 'result') { sessionId = event.sessionId; resultText = event.text; structuredOutput = event.structuredOutput }
       }
       if (structured) {
-        const response = parseResponse(structuredOutput ?? (resultText || rawText), tools)
+        const response = parse(structuredOutput ?? (resultText || rawText))
         yield* append('text', response.text)
         yield* close()
         for (const call of response.toolCalls) {
@@ -119,6 +154,10 @@ export class CodeBuddyAdapter extends LlmAdapter {
       }
     } catch (error) {
       yield* close()
+      if (parseFailed && !options.signal?.aborted) {
+        yield* append('text', failedResponseText(resultText, rawText, structuredOutput))
+        yield* close()
+      }
       if (usage) yield { type: 'usage', usage }
       yield { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: { code: options.signal?.aborted ? 'ABORTED' : 'CODEBUDDY_ERROR', message: error instanceof Error ? error.message : String(error) } } }
     }

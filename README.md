@@ -28,7 +28,7 @@ npm install -g @tencent-ai/codebuddy-code
 需要本机安装 Git。公开仓库使用 HTTPS，不要求 SSH 密钥。将 `web` 替换成实际使用的 DSH profile：
 
 ```sh
-dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.17"
+dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.18"
 ```
 
 仓库**包含已构建的 dist**，安装不依赖 TypeScript、开发依赖或安装时构建脚本。CI 会重新构建并检查提交的产物，避免源码与产物不一致。
@@ -44,10 +44,10 @@ dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-lin
 从 [Releases](https://github.com/liubaicai/dsh-codebuddy-link/releases) 下载对应版本 `.tgz`，可使用同页 `SHA256SUMS.txt` 核对 SHA-256。进入下载目录后执行：
 
 ```powershell
-dsh plugin --profile web add .\dsh-codebuddy-link-0.3.17.tgz
+dsh plugin --profile web add .\dsh-codebuddy-link-0.3.18.tgz
 ```
 
-macOS/Linux 使用 `./dsh-codebuddy-link-0.3.17.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
+macOS/Linux 使用 `./dsh-codebuddy-link-0.3.18.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
 
 ### 4. 启用与升级
 
@@ -129,7 +129,7 @@ Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 
 
 `models` 是已启用列表；设置页可发现候选并保存选择。发现结果不会自动启用，也不会改变 CLI 登录区域或授予跨区调用权限。不要将其他服务的模型名直接当作 CodeBuddy ID。
 
-## 思考强度、调用诊断与排队（0.3.17）
+## 思考强度、调用诊断与排队（0.3.18）
 
 思考强度优先级：**本次调用显式值 > 面板/插件默认值 > `auto`**。会话模型的思考等级与 `codebuddy_ask` 的 `reasoningEffort` 参数遵循同一规则；显式 `auto` 不传 `--effort`，不会继承默认的 `high` 等值。无效值直接报错，不静默回退。CLI/具体模型是否支持、是否实际采用该等级仍由上游决定；不保证最大思考或最大上下文。
 
@@ -139,13 +139,15 @@ Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 
 
 状态包括排队、启动、等待响应、响应中、完成、失败、取消。无进展时间只由正文/思考/工具事件更新，初始化元数据不算进展；提醒只是“仍在等待”，不是失败，不触发重试。提醒阈值对现有记录立即生效。进入面板时自动查询一次账户，账户可用后自动获取模型列表；手动刷新账户同样按此顺序执行。面板挂载期间每 2 秒只读取本机状态，不轮询账户积分、模型列表或 OAuth，不覆盖未保存设置。
 
-诊断仅存在进程内存，按调用入队顺序只保留最近 5 条记录（不限状态），重启清空；面板在“保存设置”下方显示，新调用在前。旧记录移出历史不会取消调用或改变队列调度。仅保留白名单元数据，不记录提示词、回复、工作目录、原始 CLI 事件、凭据或原始错误文本。模型标识限制长度/字符并拒绝 URL、绝对路径及遍历片段；这不是能识别伪装成合法模型 ID 的任意秘密的检测器。原有 `/codebuddy status` 仍展示管理员配置（含 CLI/工作目录），分享时请自行检查。
+设置页运行记录仅存在进程内存，按调用入队顺序只保留最近 5 条记录（不限状态），重启清空；面板在“保存设置”下方显示，新调用在前。旧记录移出历史不会取消调用或改变队列调度。仅保留白名单元数据，不记录提示词、回复、工作目录、原始 CLI 事件、凭据或原始错误文本。模型标识限制长度/字符并拒绝 URL、绝对路径及遍历片段；这不是能识别伪装成合法模型 ID 的任意秘密的检测器。原有 `/codebuddy status` 仍展示管理员配置（含 CLI/工作目录），分享时请自行检查。
 
 ## 工作方式与权限边界
 
 每次调用启动一个新的 CLI 进程，通过 stdin 发送完整、有序的 DSH 对话；不使用 `--resume`，不持久化 CLI session。DSH 历史包含先前工具调用和结果，思考块不回传。这样重试、分叉和压缩后的对话不会与另一套 CLI 会话历史错位。
 
 **Provider 模式始终使用 `--tools "" --permission-mode dontAsk`。** 有 DSH 工具时通过提示词要求 CLI 只返回 `{"text", "toolCalls"}` JSON 信封（0.3.10 起不再使用 `--json-schema`：实测该模式使计费输入膨胀 4-8 倍、耗时约 3 倍且偶尔拒绝调用其内部 StructuredOutput 工具），桥接层统一解析完整回复（支持 JSON 围栏与常见协议格式，不从说明文字中提取可执行片段），校验工具名称和参数 JSON，再转换为原生 DSH tool-call，由 DSH 负责权限与执行。此模式等待完整结果后输出，不能保证逐 token 显示。没有工具的调用支持文本流。
+
+工具参数优先要求模型返回 JSON 对象，避免嵌套 JSON 字符串的双重转义；仍兼容已有的合法字符串参数。解析失败时，会话显示完整原始回复的文本代码块，并保留失败状态；整批工具调用均不执行，不自动删除多余括号、不截取部分工具、不自动重试。参数字符串错误会标明第几个工具调用。CLI 的最终正文优先于流式片段；若 `structured_output` 是解析输入，也展示该值的 JSON 表示（不是原始传输字节）。插件不截断这段诊断正文；DSH 的渲染、历史保留和压缩仍由宿主管理。**原文会进入会话记录，可能包含代码或敏感内容，复制分享前请检查。** 不显示提示词、认证配置、stderr 或原始传输事件；设置页的运行记录仍只含元数据。
 
 `codebuddy_ask` 默认同样关闭 CLI 工具。如果管理员显式启用 `tools`，CLI 工具会在独立进程中执行，**不受 DSH 文件沙箱约束，也没有逐项 DSH 工具卡片或确认界面**。不要在不可信任务中启用；不要使用该设置绕过 DSH 的权限限制。启用工具时必须能解析到 session 工作目录，或显式配置 `workspaceRoot`。本插件不提供 `bypassPermissions`。
 

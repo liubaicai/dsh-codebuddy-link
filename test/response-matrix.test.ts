@@ -177,12 +177,13 @@ test('every provider format works through structuredOutput, result and fragmente
     const last=out.at(-1);assert.equal(last?.type==='finish'&&last.reason.kind,'tool-calls')
   }
 })
-test('invalid trailing blocks emit no earlier text or tools and retain usage', async()=>{
+test('invalid trailing blocks emit diagnostic text but no executable calls and retain usage', async()=>{
   for(const value of invalid) {
     // Use arrays to place a valid call before every invalid structured member.
     const combined=typeof value==='string'?JSON.stringify({text:'checking',toolCalls:[call(args)]})+'\n'+value:[{text:'checking',toolCalls:[call(args)]},value]
     const out=await replay(combined,'structured')
-    assert.equal(out.filter(c=>['text-delta','tool-call-delta','block-start'].includes(c.type)).length,0)
+    assert.equal(out.filter(c=>c.type==='tool-call-delta'||c.type==='block-start'&&c.blockType==='tool-call').length,0)
+    assert.match(out.filter(c=>c.type==='text-delta').map(c=>c.text).join(''), /响应解析失败/)
     assert.equal(out.filter(c=>c.type==='usage').length,1)
     assert.equal(out.filter(c=>c.type==='finish').length,1)
     const last=out.at(-1);assert.equal(last?.type==='finish'&&last.reason.kind,'error')

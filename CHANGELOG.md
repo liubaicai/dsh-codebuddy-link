@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.18
+
+- Show the complete model reply as a fenced diagnostic when provider response parsing fails, while retaining an error finish and executing no tool calls. Preserve final-result-only replies, usage and failed runtime status; keep raw replies out of settings diagnostics. No automatic repair, retry or model calls.
+- Prefer object-valued tool arguments in the prompt/schema to avoid nested JSON string escaping; keep valid legacy strings compatible and identify the failing tool-call ordinal for string parsing errors.
+- Fix JSON fence termination on Unicode line separators inside valid JSON strings. Add a regression from the reported step-5-preview response with a stray bracket in its third tool's arguments.
+
 ## 0.3.17
 
 - Refresh the account automatically when opening settings, then fetch the model catalog only when the fresh account status is available. Manual account refresh follows the same sequence, without adding external requests to the local status polling loop or overwriting unsaved settings.

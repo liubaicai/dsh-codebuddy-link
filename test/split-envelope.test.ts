@@ -87,10 +87,13 @@ test('adapter replays split fixture through fragmented stream and final result p
   }
 })
 
-test('adapter validates the entire response before emitting any text or calls', async () => {
+test('adapter validates entire response before calls and shows failures only as diagnostic text', async () => {
   for (const text of bad) {
     const out = await replay(text)
-    assert.equal(out.filter(c => c.type === 'text-delta' || c.type === 'tool-call-delta' || c.type === 'block-start').length, 0)
+    assert.equal(out.filter(c => c.type === 'tool-call-delta' || c.type === 'block-start' && c.blockType === 'tool-call').length, 0)
+    const diagnostic = out.filter(c => c.type === 'text-delta').map(c => c.text).join('')
+    assert.match(diagnostic, /响应解析失败/)
+    assert.ok(diagnostic.includes(text))
     assert.equal(out.filter(c => c.type === 'finish').length, 1)
     assert.equal(out.filter(c => c.type === 'usage').length, 1)
     const finish = out.at(-1)
