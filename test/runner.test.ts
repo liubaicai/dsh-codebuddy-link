@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, copyFile, rm, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, copyFile, rm, readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -98,7 +98,8 @@ test('Windows npm shim resolves to JavaScript without shell execution', async t 
   if (process.platform !== 'win32') { const { chmod } = await import('node:fs/promises'); await chmod(shim, 0o755); }
   const resolved = await resolveCodeBuddyBin(shim, f.cwd);
   assert.equal(resolved.command, process.execPath);
-  assert.equal(resolved.args[0], target);
+  // Windows runners can expose TEMP through an 8.3 alias; resolver canonicalizes it.
+  assert.equal(resolved.args[0], await realpath(target));
 });
 test('childEnv forces ELECTRON_RUN_AS_NODE so Electron hosts spawn plain Node children', () => {
   const env = childEnv();

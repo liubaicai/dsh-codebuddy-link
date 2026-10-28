@@ -162,6 +162,7 @@ test('CN success still merges international catalog and package candidates with 
   try {
     await mkdir(join(dir, 'bin'))
     await writeFile(join(dir, 'bin', 'codebuddy'), '#!/usr/bin/env node\n')
+    await chmod(join(dir, 'bin', 'codebuddy'), 0o755)
     await writeFile(join(dir, 'package.json'), JSON.stringify({ name: '@tencent-ai/codebuddy-code' }))
     await writeFile(join(dir, 'product.json'), JSON.stringify({ models: [{ id: 'pkg-model', name: 'Pkg-only' }, { id: 'fixture-model', name: 'Stale package name' }], agents: [{ name: 'cli', models: ['pkg-model', 'fixture-model'] }] }))
     const merged = await createModelDiscoverer({ bin: join(dir, 'bin', 'codebuddy'), fetch: mock([payload], 200, international).fetch })()
