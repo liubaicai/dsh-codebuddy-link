@@ -2,6 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { isModelIdentifier as identifier } from './metadata.ts'
 import { isCodeBuddyEffort, type PluginConfig } from './config.ts'
 import { runCodeBuddy, type CodeBuddyRequest, type BridgeEvent } from './runner.ts'
+import type { AccountLease } from './account-scheduler.ts'
+
+export interface RuntimeAccounts {
+  acquire(request: CodeBuddyRequest): Promise<AccountLease | undefined>
+  invalidate(accountId: string, authToken?: string): Promise<void>
+  beforeRun?(lease: AccountLease | undefined): Promise<string | undefined>
+}
 
 export interface RunSnapshot {
   id: string
@@ -9,6 +16,8 @@ export interface RunSnapshot {
   state: 'queued' | 'starting' | 'waiting' | 'responding' | 'completed' | 'failed' | 'cancelled'
   requestedModel: string
   returnedModel?: string
+  accountId?: string
+  accountName?: string
   requestedEffort: string
   contextWindow?: number
   contextSource?: 'model' | 'fallback'
@@ -34,7 +43,8 @@ export class CallRuntime {
   private readonly records = new Map<string, RunSnapshot>()
   private readonly queue: Waiter[] = []
   private active = 0
-  constructor(config: PluginConfig) { this.config = config }
+  private readonly accounts?: RuntimeAccounts
+  constructor(config: PluginConfig, accounts?: RuntimeAccounts) { this.config = config; this.accounts = accounts }
   snapshots(): RunSnapshot[] {
     const now = Date.now()
     return [...this.records.values()].reverse().map(record => ({
@@ -90,11 +100,19 @@ export class CallRuntime {
     this.records.set(record.id, record)
     this.prune()
     let release: (() => void) | undefined
+    let lease: AccountLease | undefined
+    let usedToken: string | undefined
     try {
+      if (this.accounts) lease = await this.accounts.acquire(request)
+      if (lease) { record.accountId = lease.accountId; record.accountName = lease.accountName }
       release = await this.acquire(record.id, request.signal)
       if (request.signal?.aborted) throw error('AbortError', 'CodeBuddy request aborted')
+      const refreshedToken = this.accounts?.beforeRun ? await this.accounts.beforeRun(lease) : undefined
+      const authToken = lease ? refreshedToken ?? lease.authToken : request.authToken
+      usedToken = authToken
+      if (request.signal?.aborted) throw error('AbortError', 'CodeBuddy request aborted')
       record.state = 'starting'; record.startedAt = Date.now()
-      for await (const event of runner({ ...request, onSpawn: () => {
+      for await (const event of runner({ ...request, authToken, onSpawn: () => {
         record.state = 'waiting'
         request.onSpawn?.()
       } })) {
@@ -113,12 +131,13 @@ export class CallRuntime {
       record.state = 'completed'
     } catch (cause) {
       const name = cause instanceof Error ? cause.name : ''
+      if (name === 'CodeBuddyAuthError' && lease) await this.accounts?.invalidate(lease.accountId, usedToken).catch(() => {})
       record.state = name === 'AbortError' || request.signal?.aborted ? 'cancelled' : 'failed'
       record.failure = record.state === 'cancelled' ? 'aborted' : name === 'QueueTimeoutError' ? 'queue-timeout' : name === 'TimeoutError' ? 'timeout' : 'error'
       throw cause
     } finally {
       if (!terminal(record.state)) { record.state = 'cancelled'; record.failure = 'aborted' }
-      record.endedAt = Date.now(); release?.(); this.prune()
+      record.endedAt = Date.now(); release?.(); lease?.release(); this.prune()
     }
   }
 }

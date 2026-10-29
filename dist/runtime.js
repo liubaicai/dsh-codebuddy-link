@@ -10,7 +10,8 @@ export class CallRuntime {
     records = new Map();
     queue = [];
     active = 0;
-    constructor(config) { this.config = config; }
+    accounts;
+    constructor(config, accounts) { this.config = config; this.accounts = accounts; }
     snapshots() {
         const now = Date.now();
         return [...this.records.values()].reverse().map(record => ({
@@ -78,13 +79,26 @@ export class CallRuntime {
         this.records.set(record.id, record);
         this.prune();
         let release;
+        let lease;
+        let usedToken;
         try {
+            if (this.accounts)
+                lease = await this.accounts.acquire(request);
+            if (lease) {
+                record.accountId = lease.accountId;
+                record.accountName = lease.accountName;
+            }
             release = await this.acquire(record.id, request.signal);
+            if (request.signal?.aborted)
+                throw error('AbortError', 'CodeBuddy request aborted');
+            const refreshedToken = this.accounts?.beforeRun ? await this.accounts.beforeRun(lease) : undefined;
+            const authToken = lease ? refreshedToken ?? lease.authToken : request.authToken;
+            usedToken = authToken;
             if (request.signal?.aborted)
                 throw error('AbortError', 'CodeBuddy request aborted');
             record.state = 'starting';
             record.startedAt = Date.now();
-            for await (const event of runner({ ...request, onSpawn: () => {
+            for await (const event of runner({ ...request, authToken, onSpawn: () => {
                     record.state = 'waiting';
                     request.onSpawn?.();
                 } })) {
@@ -109,6 +123,8 @@ export class CallRuntime {
         }
         catch (cause) {
             const name = cause instanceof Error ? cause.name : '';
+            if (name === 'CodeBuddyAuthError' && lease)
+                await this.accounts?.invalidate(lease.accountId, usedToken).catch(() => { });
             record.state = name === 'AbortError' || request.signal?.aborted ? 'cancelled' : 'failed';
             record.failure = record.state === 'cancelled' ? 'aborted' : name === 'QueueTimeoutError' ? 'queue-timeout' : name === 'TimeoutError' ? 'timeout' : 'error';
             throw cause;
@@ -120,6 +136,7 @@ export class CallRuntime {
             }
             record.endedAt = Date.now();
             release?.();
+            lease?.release();
             this.prune();
         }
     }

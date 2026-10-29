@@ -1,11 +1,19 @@
 import { type PluginConfig } from './config.ts';
 import { runCodeBuddy, type CodeBuddyRequest, type BridgeEvent } from './runner.ts';
+import type { AccountLease } from './account-scheduler.ts';
+export interface RuntimeAccounts {
+    acquire(request: CodeBuddyRequest): Promise<AccountLease | undefined>;
+    invalidate(accountId: string, authToken?: string): Promise<void>;
+    beforeRun?(lease: AccountLease | undefined): Promise<string | undefined>;
+}
 export interface RunSnapshot {
     id: string;
     source: 'model' | 'ask';
     state: 'queued' | 'starting' | 'waiting' | 'responding' | 'completed' | 'failed' | 'cancelled';
     requestedModel: string;
     returnedModel?: string;
+    accountId?: string;
+    accountName?: string;
     requestedEffort: string;
     contextWindow?: number;
     contextSource?: 'model' | 'fallback';
@@ -27,7 +35,8 @@ export declare class CallRuntime {
     private readonly records;
     private readonly queue;
     private active;
-    constructor(config: PluginConfig);
+    private readonly accounts?;
+    constructor(config: PluginConfig, accounts?: RuntimeAccounts);
     snapshots(): RunSnapshot[];
     private prune;
     /** Re-evaluate live concurrency changes without interrupting active calls. */

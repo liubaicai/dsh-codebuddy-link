@@ -101,6 +101,12 @@ export class AuthStore {
   }
 }
 
+/** Minimal persistence surface shared by legacy and managed-account OAuth. */
+export interface AuthCredentialStore {
+  readonly revision: number
+  import(value: unknown): Promise<void>
+  clear(): Promise<void>
+}
 export interface AuthManagerOptions { fetch?: typeof globalThis.fetch; now?: () => number }
 export interface AuthStart { flowId: string; verificationUri: string; expiresIn: number; interval: number }
 export type AuthPoll = { status: 'pending'; interval: number } | { status: 'ok' }
@@ -134,14 +140,14 @@ function verification(value: unknown, state: string): string {
   } catch { throw failed() }
 }
 
-export class AuthManager {
+export class AuthManager<Store extends AuthCredentialStore = AuthStore> {
   private readonly fetcher: typeof globalThis.fetch
   private readonly now: () => number
   private flow?: Flow
   private generation = 0
   private starting?: AbortController
-  readonly store: AuthStore
-  constructor(store: AuthStore, options: AuthManagerOptions = {}) {
+  readonly store: Store
+  constructor(store: Store, options: AuthManagerOptions = {}) {
     this.store = store; this.fetcher = options.fetch ?? globalThis.fetch; this.now = options.now ?? Date.now
   }
   cancelAll(): void {

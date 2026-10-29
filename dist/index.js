@@ -7,47 +7,32 @@ import { CallRuntime } from "./runtime.js";
 import { runCodeBuddy } from "./runner.js";
 import { SettingsStore } from "./settings.js";
 import { registerSettingsRoutes } from "./web.js";
-import { createAccountRefresher } from "./credits.js";
-import { AuthStore, AuthManager } from "./auth.js";
-import { createModelDiscoverer } from "./models.js";
+import { AccountStore, AccountAuthManager } from "./accounts.js";
+import { AccountService } from "./account-service.js";
 export const name = 'dsh-codebuddy-link';
 export const inject = ['llm', 'commands'];
 export function apply(ctx, entry = {}) {
     const store = new SettingsStore(entry);
     const config = store.config;
-    const runtime = new CallRuntime(config);
-    const credentials = new AuthStore();
-    /** The saved plugin credential is handed to every CLI child via CODEBUDDY_AUTH_TOKEN. */
-    const readAuthToken = async () => {
-        try {
-            return (await credentials.read())?.accessToken;
-        }
-        catch {
-            return undefined;
-        }
-    };
+    const credentials = new AccountStore();
+    const accounts = new AccountService(credentials, config);
+    const runtime = new CallRuntime(config, accounts);
     ctx.inject(['webServer'], sub => {
         const server = sub.get('webServer');
         if (!server)
             return;
-        const manager = new AuthManager(credentials);
-        const fileRefresh = createAccountRefresher();
-        const savedRefresh = createAccountRefresher({ readCredentials: async () => {
-                const login = await credentials.read();
-                return login ? { auth: { accessToken: login.accessToken, tokenType: 'Bearer' }, account: { uid: login.uid } } : undefined;
-            } });
-        const refresh = async () => (await credentials.status()).configured ? savedRefresh() : fileRefresh();
-        return registerSettingsRoutes(server, store, () => { runtime.refresh(); ctx.emit('llm/adapters-updated'); }, refresh, {
-            status: () => credentials.status(), import: value => manager.import(value), clear: () => manager.clear(),
-            start: () => manager.start(), poll: id => manager.poll(id), cancel: id => manager.cancel(id), cancelAll: () => manager.cancelAll(),
-        }, createModelDiscoverer({ bin: config.codebuddyBin, readCredentials: () => credentials.read() }), () => runtime.snapshots());
+        const manager = new AccountAuthManager(credentials);
+        return registerSettingsRoutes(server, store, () => { runtime.refresh(); accounts.scheduler.refresh(); ctx.emit('llm/adapters-updated'); }, () => accounts.refresh(), {
+            status: async () => ({ configured: credentials.list().length > 0 }),
+            start: id => manager.start(id), poll: id => manager.poll(id), cancel: id => manager.cancel(id), cancelAll: () => manager.cancelAll(),
+        }, () => accounts.discover(), () => runtime.snapshots(), accounts);
     });
     const sessionCwd = (id) => {
         const sessions = ctx.get('sessions');
         return sessions?.get(id)?.header?.cwd;
     };
     if (config.enabled)
-        ctx.llm.registerAdapter(['codebuddy'], new CodeBuddyAdapter(config, undefined, sessionCwd, readAuthToken, runtime));
+        ctx.llm.registerAdapter(['codebuddy'], new CodeBuddyAdapter(config, undefined, sessionCwd, undefined, runtime));
     ctx.commands.register({
         name: 'codebuddy', description: 'CodeBuddy bridge status, models and setup',
         input: { hint: '<status|models|runs|help>' },
@@ -64,7 +49,7 @@ export function apply(ctx, entry = {}) {
                         `Provider transport: ACP stdio; CodeBuddy native default tools; outside DSH sandbox; skip permissions: ${config.dangerouslySkipPermissions}`,
                         `Delegation tools: ${config.tools || 'disabled'} (${config.permissionMode})`,
                         `Workspace: ${config.workspaceRoot || 'DSH session workspace'}`,
-                        'Authentication: the saved CodeBuddy plugin credential is passed to the CLI automatically; otherwise the CLI uses its own login. This status does not verify login.',
+                        'Authentication: fixed account or session-affine account pool; account credentials are injected per child. CLI-local login is used only before any plugin account has been managed.',
                     ].join('\n') };
             if (command === 'models')
                 return { kind: 'success', text: config.models.filter(id => !config.hiddenModels.includes(id)).map(id => `- codebuddy/${id}`).join('\n') };
@@ -102,7 +87,7 @@ export function apply(ctx, entry = {}) {
                 for await (const event of runtime.run({ prompt: args.prompt, cwd: cwd || process.cwd(), bin: config.codebuddyBin || undefined,
                     effort: resolveEffort(args.reasoningEffort, config.reasoningEffort),
                     model: model === 'default' ? undefined : model, permissionMode: config.permissionMode, tools: config.tools,
-                    timeoutMs: config.timeoutMs, signal: exec.signal, authToken: await readAuthToken() }, 'ask')) {
+                    timeoutMs: config.timeoutMs, signal: exec.signal, sessionId: agent?.session?.header?.id }, 'ask')) {
                     if (event.type === 'text')
                         text += event.delta;
                     if (event.type === 'result')
@@ -113,7 +98,7 @@ export function apply(ctx, entry = {}) {
         });
         // defineTool copies options; attach the live getter to the resulting definition.
         // Host timers cannot exceed signed 32-bit milliseconds.
-        Object.defineProperty(tool, 'timeoutMs', { enumerable: true, get: () => Math.min(2147483647, config.timeoutMs + config.queueTimeoutMs + 5000) });
+        Object.defineProperty(tool, 'timeoutMs', { enumerable: true, get: () => Math.min(2147483647, config.timeoutMs + 2 * config.queueTimeoutMs + 5000) });
         sub.tools.register(tool);
     });
 }

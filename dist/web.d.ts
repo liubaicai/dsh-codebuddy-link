@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { SettingsStore } from './settings.ts';
+import type { AccountService } from './account-service.ts';
 export interface AccountStatus {
     status: 'ok' | 'unavailable' | 'auth-required' | 'error';
     message?: string;
@@ -21,9 +22,7 @@ export interface AuthService {
     status(): Promise<{
         configured: boolean;
     }>;
-    import(value: unknown): Promise<void>;
-    clear(): Promise<void>;
-    start(): Promise<unknown>;
+    start(accountId?: string): Promise<unknown>;
     poll(flowId: string): Promise<unknown>;
     cancel(flowId: string): unknown;
     cancelAll(): void;
@@ -35,4 +34,4 @@ export declare function registerSettingsRoutes(server: WebServerLike, store: Set
         contextWindow?: number;
     }[];
     message?: string;
-}>, readRuns?: () => unknown[]): () => void;
+}>, readRuns?: () => unknown[], accounts?: AccountService): () => void;

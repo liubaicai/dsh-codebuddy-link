@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.21
+
+- Add browser-authorized multi-account storage, metadata-only management, legacy credential migration, fixed selection and session-affine round-robin pools. Enforce one live call per account, bounded cancellable queues and fresh credentials before spawn. Never silently fall back after account management starts, switch identity mid-call, or replay failed work.
+- Isolate account quota/catalog diagnostics, mark confirmed authentication failures for reauthorization, and protect freshly rotated credentials from stale failures. Catalog discovery remains distinct from model entitlement.
+- Compact settings into account cards, model chips, shared model/delegation controls, hover/focus safety help and collapsed run history. Remove JSON import endpoints and manual model/runtime/tools controls from the UI; retain administrator configuration.
+- Add storage/OAuth, scheduler, runtime/HTTP and UI regressions. Cover cancellation through process cleanup, credential rotation, managed-mode transitions and active-session affinity. Include both queue budgets in the delegation host timeout.
+
 ## 0.3.20
 
 - Connect autonomous execution through ACP stdio (`initialize`, `session/new`, `session/prompt`, `session/update`, `session/cancel`) instead of print streams. Use a fresh session with each DSH history projection, bind both process/session cwd, never auto-fallback/replay, deny residual permission prompts, and validate bounded JSON-RPC messages with cancellation/process-tree cleanup.

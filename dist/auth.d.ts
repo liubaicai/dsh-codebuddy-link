@@ -16,6 +16,12 @@ export declare class AuthStore {
     import(value: unknown): Promise<void>;
     clear(): Promise<void>;
 }
+/** Minimal persistence surface shared by legacy and managed-account OAuth. */
+export interface AuthCredentialStore {
+    readonly revision: number;
+    import(value: unknown): Promise<void>;
+    clear(): Promise<void>;
+}
 export interface AuthManagerOptions {
     fetch?: typeof globalThis.fetch;
     now?: () => number;
@@ -32,14 +38,14 @@ export type AuthPoll = {
 } | {
     status: 'ok';
 };
-export declare class AuthManager {
+export declare class AuthManager<Store extends AuthCredentialStore = AuthStore> {
     private readonly fetcher;
     private readonly now;
     private flow?;
     private generation;
     private starting?;
-    readonly store: AuthStore;
-    constructor(store: AuthStore, options?: AuthManagerOptions);
+    readonly store: Store;
+    constructor(store: Store, options?: AuthManagerOptions);
     cancelAll(): void;
     cancel(flowId: string): void;
     clear(): Promise<void>;

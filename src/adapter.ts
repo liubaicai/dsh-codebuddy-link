@@ -82,7 +82,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
       // Native ACP operations are executed by the CLI. Never request or parse
       // DSH tool envelopes, including for restricted housekeeping calls.
       for await (const event of this.runtime.run({
-        prompt,
+        prompt, sessionId: options.sessionId,
         // Keep CodeBuddy's native system prompt/tool guidance in autonomous mode.
         ...(autonomous ? { appendSystemPrompt: autonomousSystemPrompt(options.system) } : { systemPrompt: buildSystemPrompt(options.system, false) }),
         cwd, bin: cfg.codebuddyBin || undefined,

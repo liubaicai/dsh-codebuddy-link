@@ -60,12 +60,12 @@ test('runtime settings persist atomically and invalid updates leave live and sav
   } finally { rmSync(dir, {recursive:true, force:true}) }
 })
 
-test('auth HTTP routes enforce same origin and never echo import secrets', async () => {
+test('auth HTTP routes enforce same origin, remove JSON import, and never echo secrets', async () => {
   const dir = mkdtempSync(join(tmpdir(),'cb-auth-http-'))
   const routes = new Map<string, Parameters<WebServerLike['register']>[0]['handler']>()
-  let configured = false; let imported: unknown; let cancelled = false
+  let configured = false; let cancelled = false
   const dispose = registerSettingsRoutes({register(route){routes.set(route.path,route.handler)}},new SettingsStore({},join(dir,'settings.json')),() => {},undefined,{
-    status:async () => ({configured}), import:async value => {imported=value;configured=true}, clear:async () => {configured=false},
+    status:async () => ({configured}),
     start:async () => ({flowId:'flow',verificationUri:'https://www.codebuddy.cn/login'}),
     poll:async () => {throw new Error('private-token')},cancel:() => {},cancelAll:() => {cancelled=true},
   })
@@ -75,17 +75,17 @@ test('auth HTTP routes enforce same origin and never echo import secrets', async
   const post = (action:string, body:unknown, origin?:string) => fetch(base+action,{method:'POST',headers:{'content-type':'application/json',...(origin ? {origin} : {})},body:JSON.stringify(body)})
   try {
     assert.equal((await fetch(base+'auth/start')).status,405)
-    assert.equal((await post('auth/import',{content:'{}'},'https://evil.example')).status,403)
-    assert.equal(imported,undefined)
-    const saved = await post('auth/import',{content:JSON.stringify({access_token:'private-token',uid:'u'})})
-    assert.deepEqual(await saved.json(),{configured:true})
-    assert.deepEqual(imported,{access_token:'private-token',uid:'u'})
+    assert.equal((await post('auth/start',{},'https://evil.example')).status,403)
+    assert.equal(routes.has('/plugins/codebuddy-link/auth/import'),false)
+    assert.equal(routes.has('/plugins/codebuddy-link/auth/clear'),false)
+    const saved = await post('auth/start',{})
+    assert.equal(saved.status,200)
     const status = await (await fetch(base+'status')).json() as {runs:unknown[]}
     assert.deepEqual(status.runs, [])
     assert.ok(!JSON.stringify(status).includes('private-token'))
     const failed = await post('auth/poll',{flowId:'flow'})
     assert.equal(failed.status,400); assert.ok(!(await failed.text()).includes('private-token'))
-    assert.deepEqual(await (await post('auth/clear',{})).json(),{configured:false})
+    assert.deepEqual(await (await post('auth/cancel',{flowId:'flow'})).json(),{status:'cancelled'})
   } finally {dispose();assert.equal(cancelled,true);server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve()));rmSync(dir,{recursive:true,force:true})}
 })
 

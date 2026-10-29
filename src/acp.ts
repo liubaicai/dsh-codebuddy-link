@@ -200,7 +200,10 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
     if (owns(value, 'error')) {
       if (!object(value.error) || !Number.isSafeInteger(value.error.code) || typeof value.error.message !== 'string') throw protocolError();
       pending.delete(value.id);
-      entry.reject(new Error('CodeBuddy ACP request failed (server error details omitted)'));
+      // ACP standard authentication-required error; never classify message text.
+      const cause = new Error(value.error.code === -32000 ? 'CodeBuddy account requires authorization' : 'CodeBuddy ACP request failed (server error details omitted)');
+      if (value.error.code === -32000) cause.name = 'CodeBuddyAuthError';
+      entry.reject(cause);
     } else {
       // A session response and its first notification can share one stdout
       // chunk; record the ID synchronously, before the driver's await resumes.

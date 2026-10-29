@@ -3,6 +3,8 @@ import { type BridgeEvent } from './protocol.ts';
 export type { BridgeEvent } from './protocol.ts';
 export interface CodeBuddyRequest {
     prompt: string;
+    /** DSH session affinity only; never passed to the CLI. */
+    sessionId?: string;
     systemPrompt?: string;
     appendSystemPrompt?: string;
     dangerouslySkipPermissions?: boolean;

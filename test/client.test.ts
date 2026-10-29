@@ -15,6 +15,7 @@ const code = process.env.DSH_CODEBUDDY_TEST_CLIENT_SOURCE === '1'
 const payload = () => ({
   config: { enabled: true, permissionMode: 'dontAsk', models: ['basic', 'hidden', 'custom'], hiddenModels: ['hidden'], defaultModel: 'basic', tools: 'Read,Edit' },
   account: { status: 'ok' },
+  accountPool: { mode: 'fixed', selectedAccountId: 'account-1', accounts: [{ id: 'account-1', name: '主账户', enabled: true, authState: 'ready', createdAt: '2026-10-29T00:00:00.000Z', quota: { status: 'ok' } }] },
   catalogModels: [{ id: 'basic', name: '基础模型' }, { id: 'hidden', name: '隐藏模型' }],
 });
 
@@ -112,47 +113,18 @@ function control(tree: Element, label: string, type: string): Element {
 }
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
 
-test('credit display uses two decimals without modifying response values', async () => {
-  const response = { ...payload(), account: { status: 'ok', remaining: 12.3456, total: 20, used: 7.6544 } };
-  const app = mounted([{ value: response }]); app.render(); await settle();
-  const shown = content(app.render());
-  assert.match(shown, /剩余：12\.35/); assert.match(shown, /总额：20\.00/); assert.match(shown, /已用：7\.65/);
-  assert.equal(response.account.remaining, 12.3456);
-});
-
-test('discovered models can be selected and saved without typing IDs', async () => {
-  const result = { ...payload(), catalogModels: [...payload().catalogModels, { id: 'discovered-id', name: 'Discovered' }] };
-  const app = mounted([{ value: payload() }, { value: result }, { value: result }]);
-  app.render(); await settle();
-  let tree = app.render();
-  button(tree, '获取模型列表').props.onClick(); await settle();
-  tree = app.render();
-  const label = nodes(tree).find(n => n.type === 'label' && content(n).includes('Discovered'))!;
-  const checkbox = nodes(label).find(n => n.type === 'input')!;
-  assert.equal(checkbox.props.checked, false);
-  checkbox.props.onChange({ target: { checked: true } });
-  tree = app.render();
-  control(tree, '默认模型', 'select').props.onChange({ target: { value: 'discovered-id' } });
-  tree = app.render(); button(tree, '保存设置').props.onClick(); await settle();
-  assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/models');
-  const saved = JSON.parse(app.calls[4]!.init.body);
-  assert.ok(saved.models.includes('discovered-id'));
-  assert.equal(saved.defaultModel, 'discovered-id');
-  for (const n of nodes(tree).filter(n => ['button', 'select', 'textarea', 'input'].includes(String(n.type)))) assert.ok(n.props.style);
-});
-
-test('settings inherit host theme and heading rows align without asymmetric margins', async () => {
-  const app = mounted(); app.render(); await settle(); const tree = app.render();
-  assert.equal((tree.props.style as any).color, 'var(--dsw-alias-label-primary, inherit)');
-  for (const title of ['账户与积分', '启用模型']) {
-    const heading = nodes(tree).find(n => n.type === 'h3' && content(n) === title)!;
-    assert.equal((heading.props.style as any).margin, 0);
-    const parent = nodes(tree).find(n => n.children.includes(heading))!;
-    assert.equal((parent.props.style as any).alignItems, 'center');
-  }
-  const styles = JSON.stringify(nodes(tree).map(n => n.props.style));
-  assert.doesNotMatch(styles, /#202020|#646464|#f9f9fb|#fff9ed/);
-  assert.match(styles, /--dsw-alias-bg-layer-1/);
+function accountRow(tree: Element, name = '主账户'): Element {
+  return nodes(tree).find(node => node.props['aria-label'] === `账户 ${name}`)!;
+}
+function modelChip(tree: Element, id: string): Element {
+  return nodes(tree).find(node => node.type === 'button' && String(node.props['aria-label']).endsWith(`(${id})`))!;
+}
+function withQuota(quota: Record<string, unknown>) {
+  const result = payload();
+  return {...result, accountPool:{...result.accountPool, accounts:result.accountPool.accounts.map(account => ({...account, quota}))}};
+}
+const startReply = (verificationUri = 'https://www.codebuddy.cn/oauth/authorize?state=example') => ({
+  flowId: 'private-flow-id', verificationUri, expiresIn: 599, interval: 2, token: 'SHOULD-NOT-RENDER',
 });
 
 test('registers all native slots with exact keys and disposer propagation', () => {
@@ -166,367 +138,294 @@ test('registers all native slots with exact keys and disposer propagation', () =
     assert.equal(registration.component({ view: 'summary' }), null);
     assert.equal((registration.component({ view: 'detail' }) as Element).type, app.registrations[0]!.component);
   }
-  app.disposers.forEach(dispose => dispose());
-  assert.equal(app.disposed(), 3);
-  assert.equal(app.calls.length, 0);
+  app.disposers.forEach(dispose => dispose()); assert.equal(app.disposed(), 3); assert.equal(app.calls.length, 0);
 });
 
-test('mount refreshes account then models once; unknown credits remain unknown', async () => {
-  const app = mounted();
-  assert.match(content(app.render()), /加载中/);
-  await settle();
-  const tree = app.render();
-  assert.match(content(tree), /剩余：未知.*总额：未知.*已用：未知/);
-  assert.match(content(tree), /WorkBuddy.*以接口返回为准/);
-  assert.match(content(tree), /权限模式用于独立委派 CodeBuddy 工具与 ACP CLI（未跳过权限检查时）/);
-  app.render();
-  assert.equal(app.calls.length, 3);
-  assert.equal(app.calls[0]!.url, '/plugins/codebuddy-link/status');
-  assert.equal(app.calls[0]!.init.method, 'GET');
+test('compact account list shows quota precisely and has no removed controls or prose', async () => {
+  const response = withQuota({status:'ok', remaining:12.3456, total:20, used:7.6544});
+  const app = mounted([{value:response}]); app.render(); await settle(); const tree = app.render();
+  assert.match(content(accountRow(tree)), /剩余：12\.35.*总额：20\.00.*已用：7\.65/);
+  assert.equal(response.accountPool.accounts[0]!.quota.remaining, 12.3456);
+  assert.ok(button(tree, '添加账户')); assert.ok(button(tree, '固定账户')); assert.ok(button(tree, '账户池'));
+  for (const action of ['使用', '重命名', '停用', '重新授权', '刷新', '删除']) assert.ok(button(accountRow(tree), action));
+  assert.doesNotMatch(content(tree), /JSON|WorkBuddy|地区|最大并发|排队等待上限|无进展提醒|工具配置|自定义模型|手动添加|·/);
+  assert.equal(nodes(tree).filter(node => node.type === 'textarea').length, 0);
+  assert.equal(nodes(tree).filter(node => node.type === 'input' && node.props.type === 'checkbox').length, 1);
+  assert.doesNotMatch(code, /auth\/(?:import|clear)|authContent|customModel/);
+});
+
+test('settings use semantic theme with Radix fallbacks, compact borders and legible fonts', async () => {
+  const app = mounted(); app.render(); await settle(); const tree = app.render();
+  assert.equal(tree.props.style.color, 'var(--dsw-alias-label-primary, var(--gray-12, inherit))');
+  for (const title of ['账户', '启用模型']) {
+    const heading = nodes(tree).find(n => n.type === 'h3' && content(n) === title)!;
+    assert.equal(heading.props.style.margin, 0);
+    assert.equal(nodes(tree).find(n => n.children.includes(heading))!.props.style.alignItems, 'center');
+  }
+  for (const node of nodes(tree)) {
+    const style = node.props.style;
+    if (style?.fontSize) assert.ok(parseInt(style.fontSize) >= 12);
+    for (const key of ['border', 'borderTop']) if (style?.[key]) assert.match(style[key], /^0\.5px /);
+  }
+  const styles = JSON.stringify(nodes(tree).map(n => n.props.style));
+  assert.match(styles, /--dsw-alias-bg-layer-1/); assert.match(styles, /--gray-6/); assert.match(styles, /--accent-3/);
+});
+
+test('safety and danger help are real hover and focus tooltips, dismissible with Escape', async () => {
+  const app = mounted(); app.render(); await settle();
+  assert.equal(nodes(app.render()).filter(node => node.props.role === 'tooltip').length, 0);
+  const findHelp = (label: string) => nodes(app.render()).find(node => node.props['aria-label'] === label)!;
+  let trigger = findHelp('模型与独立委派安全说明');
+  assert.equal(content(trigger), '?');
+  trigger.props.onFocus();
+  let tree = app.render(); let tooltip = nodes(tree).find(node => node.props.role === 'tooltip')!;
+  assert.match(content(tooltip), /ACP 原生工具绕过 DSH 文件沙箱与确认流程/);
+  assert.equal(findHelp('模型与独立委派安全说明').props['aria-describedby'], tooltip.props.id);
+  trigger.props.onKeyDown({key:'Escape'}); assert.equal(nodes(app.render()).filter(node => node.props.role === 'tooltip').length, 0);
+  trigger.props.onBlur();
+  trigger = findHelp('跳过 CLI 权限检查风险说明');
+  assert.equal(content(trigger), '危险');
+  const wrapper = nodes(app.render()).find(node => node.children.some(child => child && typeof child === 'object' && (child as Element).props['aria-label'] === '跳过 CLI 权限检查风险说明'))!;
+  wrapper.props.onMouseEnter();
+  tree = app.render(); tooltip = nodes(tree).find(node => node.props.role === 'tooltip')!;
+  assert.match(content(tooltip), /默认关闭.*dangerously-skip-permissions.*不会隐式应用到独立委派/);
+  assert.match(content(tooltip), /不会自动批准/);
+  wrapper.props.onMouseLeave(); assert.equal(nodes(app.render()).filter(node => node.props.role === 'tooltip').length, 0);
+});
+
+test('mount refreshes accounts then models, with same-origin bounded requests and no automatic OAuth', async () => {
+  const app = mounted(); assert.match(content(app.render()), /加载中/); await settle(); app.render();
   assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/models']);
-  for (const call of app.calls) {
-    assert.equal(call.init.credentials, 'same-origin');
-    assert.equal(call.init.mode, 'same-origin');
-    assert.equal(call.init.signal.timeout, 20_000);
-  }
-  for (const call of app.calls.slice(1)) {
-    assert.equal(call.init.method, 'POST');
-    assert.equal(call.init.body, '{}');
+  assert.equal(app.calls[0]!.init.method, 'GET');
+  for (const call of app.calls) { assert.equal(call.init.credentials, 'same-origin'); assert.equal(call.init.mode, 'same-origin'); assert.equal(call.init.signal.timeout, 20000); }
+  for (const call of app.calls.slice(1)) { assert.equal(call.init.method, 'POST'); assert.equal(call.init.body, '{}'); }
+  assert.match(content(accountRow(app.render())), /剩余：未知.*总额：未知.*已用：未知/);
+});
+
+test('managed ready account supersedes legacy quota gate; empty and unauthenticated pools skip discovery', async () => {
+  const ready = {...payload(), account:{status:'auth-required'}};
+  const app = mounted([{value:ready}]); app.render(); await settle(); assert.equal(app.calls.length, 3);
+  for (const accounts of [[], [{...payload().accountPool.accounts[0]!, enabled:false}], [{...payload().accountPool.accounts[0]!, authState:'auth-required'}]]) {
+    const result = {...payload(), accountPool:{mode:'pool', accounts}};
+    const empty = harness([{value:result}, {value:result}]); empty.render(); await settle();
+    assert.equal(empty.calls.length, 2);
   }
 });
 
-test('explicit refresh posts JSON, displays real zero, and preserves unsaved edits', async () => {
-  const refreshed = { ...payload(), account: { status: 'ok', remaining: 0, used: 5, total: 5, message: '<img src=x onerror=alert(1)>' } };
-  const app = mounted([{ value: payload() }, { value: refreshed }, { value: refreshed }]);
-  app.render(); await settle();
-  control(app.render(), '权限模式', 'select').props.onChange({ target: { value: 'plan' } });
-  button(app.render(), '刷新账户').props.onClick();
-  assert.match(content(app.render()), /刷新中/);
-  await settle();
-  const tree = app.render();
-  assert.equal(control(tree, '权限模式', 'select').props.value, 'plan');
-  assert.match(content(tree), /剩余：0/);
-  assert.match(content(tree), /<img src=x onerror=alert\(1\)>/);
-  assert.ok(nodes(tree).every(node => !('dangerouslySetInnerHTML' in node.props) && node.type !== 'img'));
-  const call = app.calls[3]!;
-  assert.equal(call.url, '/plugins/codebuddy-link/refresh');
-  assert.equal(call.init.headers['Content-Type'], 'application/json');
-  assert.equal(call.init.body, '{}');
-  assert.equal(call.init.method, 'POST');
-});
-
-test('custom models, visibility, default and tools serialize exact config contract', async () => {
-  const app = mounted([{ value: payload() }, { value: payload() }]);
-  app.render(); await settle();
-  let tree = app.render();
-  const checks = nodes(tree).filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.name !== 'dangerouslySkipPermissions');
-  assert.deepEqual(checks.map(node => node.props.checked), [true, false, true]);
-  checks[0]!.props.onChange({ target: { checked: false } });
-  assert.equal(control(app.render(), '默认模型', 'select').props.value, 'custom');
-  assert.match(content(app.render()), /启用后不受DSH文件沙箱约束，默认留空/);
-  control(app.render(), '自定义模型 ID', 'input').props.onChange({ target: { value: ' new-model ' } });
-  button(app.render(), '添加并启用模型').props.onClick();
-  tree = app.render();
-  control(tree, '默认模型', 'select').props.onChange({ target: { value: 'new-model' } });
-  control(app.render(), '权限模式', 'select').props.onChange({ target: { value: 'acceptEdits' } });
-  control(app.render(), '独立委派工具配置（tools）', 'input').props.onChange({ target: { value: 'Read' } });
-  button(app.render(), '保存设置').props.onClick();
-  // A second click before React renders is coalesced by the in-flight ref.
-  button(app.render(), '保存设置').props.onClick();
-  await settle();
-  assert.equal(app.calls.length, 4);
-  assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/config');
-  assert.deepEqual(JSON.parse(app.calls[3]!.init.body), { permissionMode: 'acceptEdits', dangerouslySkipPermissions: false, models: ['basic', 'hidden', 'custom', 'new-model'], hiddenModels: ['hidden', 'basic'], defaultModel: 'new-model', tools: 'Read', reasoningEffort:'auto', maxConcurrency:2, queueTimeoutMs:600000, stallWarnMs:90000 });
+test('discovered model chips toggle visibility and save only the six editable settings', async () => {
+  const discovered = {...payload(), catalogModels:[...payload().catalogModels, {id:'discovered-id', name:'Discovered'}]};
+  const app = mounted([{value:payload()}, {value:discovered}, {value:discovered}]); app.render(); await settle();
+  button(app.render(), '获取模型列表').props.onClick(); await settle();
+  assert.equal(modelChip(app.render(), 'discovered-id').props['aria-pressed'], false);
+  modelChip(app.render(), 'discovered-id').props.onClick();
+  modelChip(app.render(), 'basic').props.onClick();
+  assert.equal(control(app.render(), '默认模型', 'select').props.value, 'discovered-id');
+  control(app.render(), '默认模型', 'select').props.onChange({target:{value:'discovered-id'}});
+  control(app.render(), '权限模式', 'select').props.onChange({target:{value:'acceptEdits'}});
+  control(app.render(), '默认推理强度', 'select').props.onChange({target:{value:'ultracode'}});
+  const save = button(app.render(), '保存设置'); save.props.onClick(); save.props.onClick(); await settle();
+  assert.equal(app.calls.length, 5);
+  assert.deepEqual(JSON.parse(app.calls[4]!.init.body), {permissionMode:'acceptEdits', dangerouslySkipPermissions:false,
+    models:['basic','hidden','custom','discovered-id'], hiddenModels:['hidden','basic'], defaultModel:'discovered-id', reasoningEffort:'ultracode'});
   assert.match(content(app.render()), /设置已保存/);
 });
 
-test('HTTP errors are visible without reporting success or discarding edits', async () => {
-  const app = mounted([{ value: payload() }, { ok: false, status: 403 }]);
-  app.render(); await settle();
-  control(app.render(), '权限模式', 'select').props.onChange({ target: { value: 'plan' } });
+test('removed runtime settings and tools survive save by being omitted, not reset to defaults', async () => {
+  const response = {...payload(), config:{...payload().config, tools:'CustomTool', maxConcurrency:7, queueTimeoutMs:12345, stallWarnMs:800, reasoningEffort:'high', executionMode:'bridge'}};
+  const app = mounted([{value:response}, {value:response}]); app.render(); await settle();
   button(app.render(), '保存设置').props.onClick(); await settle();
-  const tree = app.render();
-  assert.match(content(tree), /HTTP 403/);
-  assert.doesNotMatch(content(tree), /设置已保存/);
-  assert.equal(control(tree, '权限模式', 'select').props.value, 'plan');
-  assert.equal(button(tree, '保存设置').props.disabled, false);
+  const saved = JSON.parse(app.calls[3]!.init.body);
+  assert.deepEqual(Object.keys(saved).sort(), ['models','hiddenModels','defaultModel','permissionMode','reasoningEffort','dangerouslySkipPermissions'].sort());
+  assert.equal(saved.reasoningEffort, 'high');
+  assert.equal(app.state[1].tools, 'CustomTool'); assert.equal(app.state[1].maxConcurrency, 7);
 });
 
-test('hiding every model requires a nonempty enabled default before saving', async () => {
-  const app = mounted();
-  app.render(); await settle();
-  let checks = nodes(app.render()).filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.name !== 'dangerouslySkipPermissions');
-  checks[0]!.props.onChange({ target: { checked: false } });
-  checks = nodes(app.render()).filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.name !== 'dangerouslySkipPermissions');
-  checks[2]!.props.onChange({ target: { checked: false } });
-  let tree = app.render();
-  assert.equal(control(tree, '默认模型', 'select').props.value, '');
-  assert.equal(button(tree, '保存设置').props.disabled, true);
-  const placeholder = nodes(control(tree, '默认模型', 'select')).find(node => node.type === 'option' && node.props.value === '');
-  assert.equal(placeholder?.props.disabled, true);
-  assert.match(content(placeholder), /请选择/);
-  checks = nodes(tree).filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.name !== 'dangerouslySkipPermissions');
-  checks[0]!.props.onChange({ target: { checked: true } });
-  control(app.render(), '默认模型', 'select').props.onChange({ target: { value: 'basic' } });
-  tree = app.render();
-  assert.equal(button(tree, '保存设置').props.disabled, false);
+test('hiding all models prevents save until an enabled default is chosen', async () => {
+  const app = mounted(); app.render(); await settle();
+  assert.equal(modelChip(app.render(), 'hidden').props['aria-pressed'], false);
+  modelChip(app.render(), 'basic').props.onClick(); modelChip(app.render(), 'custom').props.onClick();
+  assert.equal(control(app.render(), '默认模型', 'select').props.value, '');
+  assert.equal(button(app.render(), '保存设置').props.disabled, true);
+  modelChip(app.render(), 'basic').props.onClick();
+  control(app.render(), '默认模型', 'select').props.onChange({target:{value:'basic'}});
+  assert.equal(button(app.render(), '保存设置').props.disabled, false);
 });
 
-test('HTTP 400 error detail is limited to 300 characters and rendered as plain text', async () => {
-  const detail = '<img src=x onerror=alert(1)>' + '错'.repeat(400);
-  const app = mounted([{ value: payload() }, { ok: false, status: 400, value: { error: detail } }]);
-  app.render(); await settle();
-  button(app.render(), '保存设置').props.onClick(); await settle();
-  const tree = app.render();
-  const alert = nodes(tree).find(node => node.props.role === 'alert');
-  assert.equal(content(alert), `请求失败（HTTP 400）：${detail.slice(0, 300)}`);
-  assert.ok(nodes(tree).every(node => !('dangerouslySetInnerHTML' in node.props) && node.type !== 'img'));
+test('per-account rename, enable-disable, refresh and removal use exact minimal contracts and preserve drafts', async () => {
+  const renamed = {...payload(), accountPool:{...payload().accountPool, accounts:[{...payload().accountPool.accounts[0]!, name:'项目账户'}]}};
+  const disabled = {...renamed, accountPool:{...renamed.accountPool, accounts:[{...renamed.accountPool.accounts[0]!, enabled:false}]}};
+  const removed = {...payload(), accountPool:{mode:'pool', accounts:[]}};
+  const app = mounted([{value:payload()}, {value:renamed}, {value:disabled}, {value:renamed}, {value:renamed}, {value:removed}]);
+  app.render(); await settle(); control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+  button(accountRow(app.render()), '重命名').props.onClick();
+  control(app.render(), '账户名称', 'input').props.onChange({target:{value:'  项目账户  '}});
+  button(app.render(), '确认重命名').props.onClick(); await settle();
+  button(accountRow(app.render(), '项目账户'), '停用').props.onClick(); await settle();
+  assert.match(content(accountRow(app.render(), '项目账户')), /已停用/);
+  button(accountRow(app.render(), '项目账户'), '启用').props.onClick(); await settle();
+  button(accountRow(app.render(), '项目账户'), '刷新').props.onClick(); await settle();
+  button(accountRow(app.render(), '项目账户'), '删除').props.onClick();
+  assert.equal(app.calls.length, 7); // Deletion requires an explicit second click.
+  button(app.render(), '确认删除').props.onClick(); await settle();
+  assert.deepEqual(app.calls.slice(3).map(call => [call.url, JSON.parse(call.init.body)]), [
+    ['/plugins/codebuddy-link/account/update', {id:'account-1', name:'项目账户'}],
+    ['/plugins/codebuddy-link/account/update', {id:'account-1', enabled:false}],
+    ['/plugins/codebuddy-link/account/update', {id:'account-1', enabled:true}],
+    ['/plugins/codebuddy-link/account/refresh', {id:'account-1'}],
+    ['/plugins/codebuddy-link/account/remove', {id:'account-1'}],
+  ]);
+  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+  assert.match(content(app.render()), /暂无账户/);
 });
 
-test('invalid response and network errors expose retry, then recover', async () => {
-  const app = harness([{ value: { config: {} } }, { error: new Error('timeout') }, { value: payload() }, { value: payload() }, { value: payload() }]);
-  app.render(); await settle();
-  assert.match(content(app.render()), /服务端状态格式无效/);
-  button(app.render(), '重试加载').props.onClick(); await settle();
-  assert.match(content(app.render()), /timeout/);
-  button(app.render(), '重试加载').props.onClick(); await settle();
-  assert.ok(button(app.render(), '保存设置'));
-  assert.equal(app.calls.length, 5);
+test('pool and fixed-account selection use separate minimal requests', async () => {
+  const pooled = {...payload(), accountPool:{...payload().accountPool, mode:'pool'}};
+  const app = mounted([{value:payload()}, {value:pooled}, {value:payload()}, {value:payload()}]); app.render(); await settle();
+  assert.equal(button(app.render(), '固定账户').props['aria-pressed'], true);
+  button(app.render(), '账户池').props.onClick(); await settle();
+  assert.equal(button(app.render(), '账户池').props['aria-pressed'], true);
+  button(accountRow(app.render()), '使用').props.onClick(); await settle();
+  button(app.render(), '固定账户').props.onClick(); await settle();
+  assert.deepEqual(app.calls.slice(3).map(call => JSON.parse(call.init.body)), [{mode:'pool'}, {mode:'fixed', accountId:'account-1'}, {mode:'fixed', accountId:'account-1'}]);
+  assert.ok(app.calls.slice(3).every(call => call.url === '/plugins/codebuddy-link/account/select'));
 });
 
-test('auth import uses its own contract, clears JSON and preserves the model draft without exposing returned tokens', async () => {
-  const secret = 'TOP-SECRET-TOKEN';
-  const app = mounted([{ value: payload() }, { value: { configured: true, token: secret } },
-    { value: { ...payload(), auth: { configured: true }, token: secret } },
-    { value: { ...payload(), auth: { configured: true }, token: secret } }]);
-  app.render(); await settle();
-  assert.match(content(app.render()), /积分查询凭据：未配置/);
-  control(app.render(), '权限模式', 'select').props.onChange({ target: { value: 'plan' } });
-  control(app.render(), '导入登录 JSON', 'textarea').props.onChange({ target: { value: JSON.stringify({ token: secret }) } });
-  button(app.render(), '导入登录信息').props.onClick();
-  button(app.render(), '导入登录信息').props.onClick();
-  await settle();
-  const tree = app.render();
-  assert.equal(app.calls.length, 6);
-  assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/auth/import');
-  assert.deepEqual(JSON.parse(app.calls[3]!.init.body), { content: JSON.stringify({ token: secret }) });
-  assert.equal(app.calls[4]!.url, '/plugins/codebuddy-link/refresh');
-  assert.equal(app.calls[5]!.url, '/plugins/codebuddy-link/models');
-  assert.equal(control(tree, '导入登录 JSON', 'textarea').props.value, '');
-  assert.equal(control(tree, '权限模式', 'select').props.value, 'plan');
-  assert.match(content(tree), /积分查询凭据：已配置/);
-  assert.match(content(tree), /不改变 CodeBuddy CLI 登录/);
-  assert.doesNotMatch(JSON.stringify(tree), new RegExp(secret));
-  assert.doesNotMatch(code, /\b(?:localStorage|console)\b/);
+test('account failure is private, retains rename draft and serializes overlapping actions', async () => {
+  let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
+  const app = mounted([{value:payload()}, {ok:false, status:400, value:{error:'PRIVATE-TOKEN'}, wait}]); app.render(); await settle();
+  button(accountRow(app.render()), '重命名').props.onClick();
+  control(app.render(), '账户名称', 'input').props.onChange({target:{value:'New name'}});
+  button(app.render(), '确认重命名').props.onClick(); app.tick(); button(accountRow(app.render()), '停用').props.onClick();
+  assert.equal(app.calls.length, 4); release(); await settle();
+  assert.match(content(app.render()), /HTTP 400/); assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-TOKEN/);
+  assert.equal(control(app.render(), '账户名称', 'input').props.value, 'New name');
 });
 
-const startReply = (verificationUri = 'https://www.codebuddy.cn/oauth/authorize?state=example') => ({
-  flowId: 'private-flow-id', verificationUri, expiresIn: 599, interval: 2, token: 'SHOULD-NOT-RENDER',
+test('status parsing whitelists nested account and run data, rejecting malformed pool fields', async () => {
+  const response = {...payload(), token:'PRIVATE-TOKEN', account:{status:'ok', token:'PRIVATE-TOKEN', message:'PRIVATE-MESSAGE'},
+    accountPool:{...payload().accountPool, token:'PRIVATE-TOKEN', accounts:[{...payload().accountPool.accounts[0]!, token:'PRIVATE-TOKEN', credentials:{token:'PRIVATE-TOKEN'},
+      quota:{status:'ok', token:'PRIVATE-TOKEN', message:'PRIVATE-MESSAGE', remaining:0}, catalogModels:[{id:'basic', name:'Basic', token:'PRIVATE-TOKEN'}]}]}};
+  const app = mounted([{value:response}]); app.render(); await settle();
+  assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/); assert.doesNotMatch(JSON.stringify(app.render()), /PRIVATE-/);
+  for (const pool of [null, {}, {mode:'other', accounts:[]}, {...payload().accountPool, selectedAccountId:42},
+    {...payload().accountPool, accounts:[{...payload().accountPool.accounts[0]!, enabled:'yes'}]},
+    {...payload().accountPool, accounts:[{...payload().accountPool.accounts[0]!, authState:'unknown'}]}]) {
+    const invalid = harness([{value:{...payload(), accountPool:pool}}]); invalid.render(); await settle();
+    assert.match(content(invalid.render()), /服务端状态格式无效/); assert.equal(invalid.calls.length, 1);
+  }
 });
 
-test('OAuth starts only on click, links safely, checks manually and refreshes on success', async () => {
-  const app = mounted([{ value: payload() }, { value: startReply() }, { value: { status: 'pending', interval: 2 } },
-    { value: { status: 'ok', token: 'SHOULD-NOT-RENDER' } }, { value: { ...payload(), auth: { configured: true } } },
-    { value: { ...payload(), auth: { configured: true } } }]);
-  app.render(); await settle();
-  control(app.render(), '导入登录 JSON', 'textarea').props.onChange({ target: { value: '{"token":"draft-secret"}' } });
-  control(app.render(), '权限模式', 'select').props.onChange({ target: { value: 'plan' } });
-  assert.equal(app.calls.length, 3);
-  button(app.render(), '使用 OAuth 登录').props.onClick(); await settle();
-  let tree = app.render();
-  const link = nodes(tree).find(node => node.type === 'a')!;
-  assert.equal(link.props.href, startReply().verificationUri);
-  assert.equal(link.props.target, '_blank');
-  assert.equal(link.props.rel, 'noopener noreferrer');
-  assert.equal(app.calls[3]!.init.body, '{}');
-  assert.doesNotMatch(content(tree), /SHOULD-NOT-RENDER|private-flow-id/);
-  app.render(); await settle();
-  assert.equal(app.calls.length, 4);
-  button(tree, '检查登录结果').props.onClick(); await settle();
-  assert.match(content(app.render()), /尚未完成登录/);
-  assert.deepEqual(JSON.parse(app.calls[4]!.init.body), { flowId: 'private-flow-id' });
+test('HTTP and network errors are private and preserve unsaved edits', async () => {
+  const app = mounted([{value:payload()}, {ok:false, status:403, value:{error:'PRIVATE-TOKEN'}}, {error:new Error('PRIVATE-NETWORK')}]);
+  app.render(); await settle(); control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+  for (const expected of [/HTTP 403/, /请求失败，请重试/]) {
+    button(app.render(), '保存设置').props.onClick(); await settle();
+    assert.match(content(app.render()), expected); assert.doesNotMatch(content(app.render()), /PRIVATE-|设置已保存/);
+    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+  }
+});
+
+test('invalid initial response exposes retry and recovers', async () => {
+  const app = harness([{value:{config:{}}}, {error:new Error('PRIVATE')}, {value:payload()}, {value:payload()}, {value:payload()}]);
+  app.render(); await settle(); assert.match(content(app.render()), /服务端状态格式无效/);
+  button(app.render(), '重试加载').props.onClick(); await settle(); assert.match(content(app.render()), /请求失败，请重试/);
+  button(app.render(), '重试加载').props.onClick(); await settle(); assert.ok(button(app.render(), '保存设置')); assert.equal(app.calls.length, 5);
+});
+
+test('browser login starts on click, validates official link, polls manually and preserves dirty config', async () => {
+  const app = mounted([{value:payload()}, {value:startReply()}, {value:{status:'pending'}}, {value:{status:'ok', token:'SHOULD-NOT-RENDER'}}, {value:payload()}, {value:payload()}]);
+  app.render(); await settle(); control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+  button(app.render(), '添加账户').props.onClick(); await settle();
+  let tree = app.render(); const link = nodes(tree).find(node => node.type === 'a')!;
+  assert.equal(link.props.href, startReply().verificationUri); assert.equal(link.props.target, '_blank'); assert.equal(link.props.rel, 'noopener noreferrer');
+  assert.equal(app.calls[3]!.init.body, '{}'); assert.doesNotMatch(JSON.stringify(tree), /SHOULD-NOT-RENDER|private-flow-id/);
+  button(tree, '检查登录结果').props.onClick(); await settle(); assert.match(content(app.render()), /尚未完成登录/);
   button(app.render(), '检查登录结果').props.onClick(); await settle();
-  tree = app.render();
-  assert.equal(control(tree, '导入登录 JSON', 'textarea').props.value, '');
-  assert.equal(control(tree, '权限模式', 'select').props.value, 'plan');
-  assert.equal(nodes(tree).filter(node => node.type === 'a').length, 0);
-  assert.match(content(tree), /积分查询凭据：已配置/);
-  assert.doesNotMatch(JSON.stringify(tree), /SHOULD-NOT-RENDER|draft-secret/);
-  assert.equal(app.calls.length, 8);
+  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+  assert.equal(nodes(app.render()).filter(node => node.type === 'a').length, 0);
+  assert.equal(app.calls.length, 8); assert.deepEqual(JSON.parse(app.calls[4]!.init.body), {flowId:'private-flow-id'});
   assert.deepEqual(app.calls.slice(-2).map(call => call.url), ['/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/models']);
+  assert.doesNotMatch(JSON.stringify(app.state), /SHOULD-NOT-RENDER/);
 });
 
-test('cancel clears pasted JSON without clearing existing credentials; explicit clear refreshes status', async () => {
-  const configured = { ...payload(), auth: { configured: true } };
-  const app = mounted([{ value: configured }, { value: startReply() }, { value: { status: 'cancelled' } },
-    { value: { configured: false } }, { value: payload() }]);
-  app.render(); await settle();
-  control(app.render(), '导入登录 JSON', 'textarea').props.onChange({ target: { value: '{"token":"secret"}' } });
-  button(app.render(), '使用 OAuth 登录').props.onClick(); await settle();
+test('reauthorization targets one account and cancel preserves existing accounts', async () => {
+  const app = mounted([{value:payload()}, {value:startReply()}, {value:{status:'cancelled'}}]); app.render(); await settle();
+  button(accountRow(app.render()), '重新授权').props.onClick(); await settle();
+  assert.deepEqual(JSON.parse(app.calls[3]!.init.body), {accountId:'account-1'});
+  assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/auth/start');
+  assert.equal(button(app.render(), '添加账户').props.disabled, true);
   button(app.render(), '取消登录').props.onClick(); await settle();
-  assert.equal(control(app.render(), '导入登录 JSON', 'textarea').props.value, '');
-  assert.match(content(app.render()), /积分查询凭据：已配置/);
+  assert.deepEqual(JSON.parse(app.calls[4]!.init.body), {flowId:'private-flow-id'});
   assert.equal(app.calls[4]!.url, '/plugins/codebuddy-link/auth/cancel');
-  assert.deepEqual(JSON.parse(app.calls[4]!.init.body), { flowId: 'private-flow-id' });
-  assert.equal(app.calls.length, 5);
-  button(app.render(), '清除积分查询凭据').props.onClick(); await settle();
-  assert.equal(app.calls[5]!.url, '/plugins/codebuddy-link/auth/clear');
-  assert.equal(app.calls[5]!.init.body, '{}');
-  assert.match(content(app.render()), /积分查询凭据：未配置/);
+  assert.ok(accountRow(app.render())); assert.equal(app.calls.length, 5);
 });
 
 test('unsafe OAuth URLs never become links', async () => {
-  for (const url of ['http://www.codebuddy.cn/auth', 'https://www.codebuddy.cn.evil.test/', 'javascript:alert(1)',
-    'https://evil.test/', 'https://user:pass@www.codebuddy.cn/', 'https://www.codebuddy.cn:444/']) {
-    const app = mounted([{ value: payload() }, { value: startReply(url) }]);
-    app.render(); await settle();
-    button(app.render(), '使用 OAuth 登录').props.onClick(); await settle();
-    assert.equal(nodes(app.render()).filter(node => node.type === 'a').length, 0, url);
-    assert.match(content(app.render()), /授权链接不安全/);
+  for (const url of ['http://www.codebuddy.cn/auth', 'https://www.codebuddy.cn.evil.test/', 'javascript:alert(1)', 'https://evil.test/', 'https://user:pass@www.codebuddy.cn/', 'https://www.codebuddy.cn:444/']) {
+    const app = mounted([{value:payload()}, {value:startReply(url)}]); app.render(); await settle();
+    button(app.render(), '添加账户').props.onClick(); await settle();
+    assert.equal(nodes(app.render()).filter(node => node.type === 'a').length, 0, url); assert.match(content(app.render()), /授权链接不安全/);
   }
 });
 
-test('auth failures do not expose server tokens, discard JSON or reset drafts; cancelled import clears JSON', async () => {
-  const app = mounted([{ value: { ...payload(), auth: { configured: 'invalid' } } },
-    { ok: false, status: 400, value: { error: 'SENSITIVE'.repeat(100) } },
-    { error: new Error('SENSITIVE network data') }, { value: { token: 'SENSITIVE' } }]);
-  app.render(); await settle();
-  control(app.render(), '权限模式', 'select').props.onChange({ target: { value: 'plan' } });
-  control(app.render(), '导入登录 JSON', 'textarea').props.onChange({ target: { value: '{}' } });
+test('auth failures never expose response bodies or network secrets', async () => {
+  const app = mounted([{value:payload()}, {ok:false, status:400, value:{error:'PRIVATE-TOKEN'}}, {error:new Error('PRIVATE-NETWORK')}, {value:{token:'PRIVATE-TOKEN'}}]);
+  app.render(); await settle(); control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
   for (const expected of [/HTTP 400/, /登录请求失败/, /登录响应格式无效/]) {
-    button(app.render(), '导入登录信息').props.onClick(); await settle();
-    assert.match(content(app.render()), expected);
-    assert.doesNotMatch(content(app.render()), /SENSITIVE/);
-    assert.equal(control(app.render(), '导入登录 JSON', 'textarea').props.value, '{}');
+    button(app.render(), '添加账户').props.onClick(); await settle();
+    assert.match(content(app.render()), expected); assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/);
     assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
   }
-  button(app.render(), '取消导入').props.onClick();
-  assert.equal(control(app.render(), '导入登录 JSON', 'textarea').props.value, '');
-  assert.equal(app.calls.length, 6);
 });
 
-test('successful auth clears JSON even when its status refresh fails', async () => {
-  const app = mounted([{ value: payload() }, { value: { configured: true } }, { error: new Error('SENSITIVE') }]);
-  app.render(); await settle();
-  control(app.render(), '导入登录 JSON', 'textarea').props.onChange({ target: { value: '{}' } });
-  button(app.render(), '导入登录信息').props.onClick(); await settle();
-  assert.equal(control(app.render(), '导入登录 JSON', 'textarea').props.value, '');
-  assert.match(content(app.render()), /状态刷新失败/);
-  assert.doesNotMatch(content(app.render()), /SENSITIVE/);
+test('successful auth ends flow even if refresh fails, with private diagnostics', async () => {
+  const app = mounted([{value:payload()}, {value:startReply()}, {value:{status:'ok'}}, {error:new Error('PRIVATE-TOKEN')}]);
+  app.render(); await settle(); button(app.render(), '添加账户').props.onClick(); await settle();
+  button(app.render(), '检查登录结果').props.onClick(); await settle();
+  assert.equal(nodes(app.render()).filter(node => node.type === 'a').length, 0);
+  assert.match(content(app.render()), /状态刷新失败/); assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/);
 });
 
-test('danger toggle is always enabled and stale executionMode fields are ignored', async () => {
-  const saved = {...payload(), config:{...payload().config, dangerouslySkipPermissions:true}};
-  const app = mounted([{value:payload()}, {value:saved}]); app.render(); await settle();
+test('danger toggle serializes explicit opt-in and malformed values fail closed', async () => {
+  const response = {...payload(), config:{...payload().config, dangerouslySkipPermissions:true, executionMode:'bridge'}};
+  const app = mounted([{value:payload()}, {value:response}]); app.render(); await settle();
   const danger = () => nodes(app.render()).find(node => node.props.name === 'dangerouslySkipPermissions')!;
-  assert.equal(danger().props.checked, false);
-  assert.notEqual(danger().props.disabled, true);
-  assert.doesNotMatch(content(app.render()), /Provider 执行模式/);
-  assert.match(content(app.render()), /不再提供 bridge\/工具协议解析模式/);
-  assert.match(content(app.render()), /ACP 原生工具绕过 DSH 文件沙箱与确认流程/);
-  danger().props.onChange({target:{checked:true}});
+  assert.equal(danger().props.checked, false); danger().props.onChange({target:{checked:true}});
   button(app.render(), '保存设置').props.onClick(); await settle();
-  const body = JSON.parse(app.calls[3]!.init.body);
-  assert.equal(body.executionMode, undefined); assert.equal(body.dangerouslySkipPermissions, true);
-  assert.equal(danger().props.checked, true);
-  // A mixed-version server still echoing the retired field cannot re-introduce the switch.
-  const stale = {...payload(), config:{...payload().config, executionMode:'bridge', dangerouslySkipPermissions:true}};
-  const older = mounted([{value:stale}]); older.render(); await settle();
-  const staleDanger = () => nodes(older.render()).find(node => node.props.name === 'dangerouslySkipPermissions')!;
-  assert.equal(staleDanger().props.checked, true); assert.notEqual(staleDanger().props.disabled, true);
-  assert.doesNotMatch(content(older.render()), /Provider 执行模式/);
-});
-
-test('malformed execution settings fail closed rather than enabling native tools', async () => {
-  for (const patch of [{dangerouslySkipPermissions:'true'}, {dangerouslySkipPermissions:1}, {dangerouslySkipPermissions:null}]) {
-    const app = harness([{value:{...payload(), config:{...payload().config, ...patch}}}]);
-    app.render(); await settle();
-    assert.match(content(app.render()), /服务端状态格式无效/);
-    assert.equal(button(app.render(), '保存设置'), undefined);
-    assert.equal(app.calls.length, 1);
-  }
-  // Retired executionMode echoes are ignored rather than fatal.
-  const app = harness([{value:{...payload(), config:{...payload().config, executionMode:'native'}}}]);
-  app.render(); await settle();
-  assert.doesNotMatch(content(app.render()), /服务端状态格式无效/);
-  assert.ok(button(app.render(), '保存设置'));
-});
-
-test('runtime controls default for legacy payloads, validate ranges and serialize settings', async () => {
-  const app = mounted([{value:payload()}, {value:payload()}]); app.render(); await settle();
-  assert.equal(control(app.render(), '默认推理强度', 'select').props.value, 'auto');
-  assert.equal(control(app.render(), '最大并发数', 'input').props.value, 2);
-  control(app.render(), '默认推理强度', 'select').props.onChange({target:{value:'ultracode'}});
-  for (const bad of ['', '0', '17', '1.5']) {
-    control(app.render(), '最大并发数', 'input').props.onChange({target:{value:bad}});
-    assert.equal(button(app.render(), '保存设置').props.disabled, true);
-  }
-  control(app.render(), '最大并发数', 'input').props.onChange({target:{value:'16'}});
-  control(app.render(), '排队等待上限（毫秒）', 'input').props.onChange({target:{value:'1'}});
-  control(app.render(), '无进展提醒（毫秒，0 关闭）', 'input').props.onChange({target:{value:'0'}});
-  assert.equal(button(app.render(), '保存设置').props.disabled, false);
-  button(app.render(), '保存设置').props.onClick(); await settle();
-  const config = JSON.parse(app.calls[3]!.init.body);
-  assert.equal(config.reasoningEffort, 'ultracode'); assert.equal(config.maxConcurrency, 16);
-  assert.equal(config.queueTimeoutMs, 1); assert.equal(config.stallWarnMs, 0);
-});
-
-test('runs display honest metadata, zero costs and unknown values while ignoring raw fields', async () => {
-  const run = {id:'run', source:'model', state:'waiting', requestedModel:'requested-id', requestedEffort:'high', queuedAt:100,
-    contextWindow:128000, contextSource:'fallback', contextOverrideSent:false, reasoningConfirmed:false, warning:true, queuePosition:0,
-    totalCostUsd:0, prompt:'PRIVATE-PROMPT', rawOutput:'PRIVATE-OUTPUT', error:'PRIVATE-ERROR', path:'PRIVATE-PATH'};
-  const app = mounted([{value:{...payload(), runs:[run, {...run, id:'done', state:'completed', returnedModel:'returned-id', totalCredits:0, totalCostUsd:undefined}, {...run, id:'unsafe-url', requestedModel:'C:/Users/PRIVATE-PATH', returnedModel:'https://host/PRIVATE-TOKEN'}, {id:'invalid'}]}}]);
-  app.render(); await settle(); const shown = content(app.render());
-  assert.match(shown, /请求模型：requested-id；返回模型：未知/);
-  assert.match(shown, /返回模型：returned-id/); assert.match(shown, /请求推理强度：high（服务端未确认）/);
-  assert.match(shown, /DSH 上下文预算：128000.*回退配置.*未向 CLI 覆盖/);
-  assert.match(shown, /积分：未知；费用（USD）：0\.00/); assert.match(shown, /积分：0\.00；费用（USD）：未知/);
-  assert.match(shown, /长时间无进展/); assert.match(shown, /当前进程内存.*5.*2 秒/);
-  assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/); assert.doesNotMatch(shown, /·/);
-});
-
-test('runs show latest five total by queuedAt below Save, without active-first exceptions or private fields', async () => {
-  const raw = {source:'model', requestedModel:'requested', requestedEffort:'high',
-    contextOverrideSent:true, reasoningConfirmed:true, warning:true, queuePosition:0,
-    prompt:'PRIVATE-PROMPT', rawOutput:'PRIVATE-OUTPUT', error:'PRIVATE-ERROR', path:'PRIVATE-PATH', token:'PRIVATE-TOKEN'};
-  const terminal = Array.from({length:55}, (_, i) => ({...raw, id:`terminal-${i}`, state:['completed','failed','cancelled'][i % 3], queuedAt:1000 - i}));
-  const live = Array.from({length:85}, (_, i) => ({...raw, id:`live-${i}`, state:['waiting','responding','starting','queued'][i % 4], queuedAt:100 - i}));
-  for (const count of [4, 85]) {
-    const app = mounted([{value:{...payload(), runs:[null, {id:'invalid'}, ...live.slice(0, count), ...terminal.toReversed()]}}]);
-    app.render(); await settle(); const tree = app.render();
-    const articles = nodes(tree).filter(node => node.type === 'article');
-    assert.deepEqual(articles.map(node => node.props.key), terminal.slice(0, 5).map(run => run.id));
-    assert.equal(articles.length, 5);
-    assert.match(content(tree), /最近 5 条运行记录.*合计最多 5 条/);
-    const history = nodes(tree).find(node => node.props['aria-label'] === '运行记录')!;
-    assert.equal(tree.children.at(-1), history);
-    assert.ok(nodes(tree).indexOf(button(tree, '保存设置')) < nodes(tree).indexOf(history));
-    assert.ok(app.state[0].runs.every((run: any) => run.contextOverrideSent === false && run.reasoningConfirmed === false));
-    assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/);
-    assert.doesNotMatch(JSON.stringify(tree), /PRIVATE-/);
+  assert.equal(JSON.parse(app.calls[3]!.init.body).dangerouslySkipPermissions, true); assert.equal(danger().props.checked, true);
+  assert.doesNotMatch(content(app.render()), /执行模式|bridge/);
+  for (const value of ['true', 1, null]) {
+    const invalid = harness([{value:{...payload(), config:{...payload().config, dangerouslySkipPermissions:value}}}]); invalid.render(); await settle();
+    assert.match(content(invalid.render()), /服务端状态格式无效/); assert.equal(button(invalid.render(), '保存设置'), undefined);
   }
 });
 
-test('latest-five cap includes mixed live and finished runs in recency order', async () => {
-  const runs = ['completed', 'queued', 'failed', 'responding', 'waiting', 'starting', 'cancelled'].map((state, i) => ({
-    id:`run-${i}`, source:'ask', requestedModel:'basic', requestedEffort:'auto', state, queuedAt:i,
-  }));
-  const app = mounted([{value:{...payload(), runs}}]); app.render(); await settle();
-  assert.deepEqual(nodes(app.render()).filter(node => node.type === 'article').map(node => node.props.key), ['run-6', 'run-5', 'run-4', 'run-3', 'run-2']);
+test('run records default collapsed, cap latest five, include account name, and whitelist metadata', async () => {
+  const raw = {source:'model', requestedModel:'requested', requestedEffort:'high', contextWindow:128000, contextSource:'fallback',
+    contextOverrideSent:true, reasoningConfirmed:true, warning:true, queuePosition:0, totalCostUsd:0,
+    accountId:'account-1', accountName:'主账户', prompt:'PRIVATE-PROMPT', rawOutput:'PRIVATE-OUTPUT', error:'PRIVATE-ERROR', path:'PRIVATE-PATH', token:'PRIVATE-TOKEN'};
+  const runs = Array.from({length:25}, (_, i) => ({...raw, id:`run-${i}`, state:['completed','failed','waiting','responding','queued'][i % 5], queuedAt:i}));
+  const app = mounted([{value:{...payload(), runs:[null, {id:'invalid'}, ...runs]}}]); app.render(); await settle(); const tree = app.render();
+  const history = nodes(tree).find(node => node.props['aria-label'] === '运行记录')!;
+  assert.equal(history.type, 'details'); assert.notEqual(history.props.open, true); assert.equal(tree.children.at(-1), history);
+  assert.deepEqual(nodes(history).filter(node => node.type === 'article').map(node => node.props.key), ['run-24','run-23','run-22','run-21','run-20']);
+  assert.match(content(history), /主账户/); assert.match(content(history), /请求推理强度：high（服务端未确认）/);
+  assert.match(content(history), /DSH 上下文预算：128000.*回退配置.*未向 CLI 覆盖/);
+  assert.match(content(history), /积分：未知；费用（USD）：0\.00/); assert.match(content(history), /长时间无进展/);
+  assert.ok(app.state[0].runs.every((run:any) => run.contextOverrideSent === false && run.reasoningConfirmed === false));
+  assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/); assert.doesNotMatch(content(tree), /·/);
 });
 
 test('two-second status polling preserves drafts, coalesces loads and ignores late results after unmount', async () => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
   const app = mounted([{value:payload()}, {value:{...payload(), config:{...payload().config, permissionMode:'acceptEdits'}}, wait}]);
-  app.render(); await settle();
-  control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+  app.render(); await settle(); control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
   app.tick(); app.tick(); button(app.render(), '刷新账户').props.onClick();
   assert.equal(app.calls.length, 4); assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/status');
   release(); await settle(); assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
   app.cleanup.forEach(dispose => dispose()); app.tick(); assert.equal(app.calls.length, 4);
-
   let finish!: () => void; const gate = new Promise<void>(resolve => {finish = resolve;});
-  const late = mounted([{value:payload()}, {value:{...payload(), account:{status:'ok', remaining:123}}, wait:gate}]);
+  const late = mounted([{value:payload()}, {value:withQuota({status:'ok', remaining:123}), wait:gate}]);
   late.render(); await settle(); late.tick(); const before = late.state[0];
   late.cleanup.forEach(dispose => dispose()); finish(); await settle(); assert.equal(late.state[0], before);
 });
@@ -534,156 +433,87 @@ test('two-second status polling preserves drafts, coalesces loads and ignores la
 test('runtime polling and auth requests never overlap or poll OAuth automatically', async () => {
   let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
   const app = mounted([{value:payload()}, {value:startReply(), wait}, {value:payload()}]);
-  app.render(); await settle(); button(app.render(), '使用 OAuth 登录').props.onClick();
-  app.tick(); assert.equal(app.calls.length, 4);
+  app.render(); await settle(); button(app.render(), '添加账户').props.onClick(); app.tick(); assert.equal(app.calls.length, 4);
   release(); await settle(); app.tick(); await settle();
   assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/models', '/plugins/codebuddy-link/auth/start', '/plugins/codebuddy-link/status']);
 });
 
 test('mount serializes status, account and models, blocks overlaps, and preserves drafts throughout', async () => {
-  const gates = Array.from({length:3}, () => {
-    let release!: () => void;
-    return {wait:new Promise<void>(resolve => {release = resolve;}), release:() => release()};
-  });
+  const gates = Array.from({length:3}, () => { let release!: () => void; return {wait:new Promise<void>(resolve => {release = resolve;}), release:() => release()}; });
   const discovered = {...payload(), config:{...payload().config, permissionMode:'acceptEdits'}, catalogModels:[{id:'found', name:'Found'}]};
   const app = harness([{value:payload(), wait:gates[0]!.wait}, {value:payload(), wait:gates[1]!.wait},
     {value:discovered, wait:gates[2]!.wait}, {value:discovered}, {value:discovered}]);
-  app.render(); app.tick();
-  assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status']);
-  gates[0]!.release(); await settle();
-  assert.equal(app.calls.length, 2);
-  assert.equal(app.calls[1]!.url, '/plugins/codebuddy-link/refresh');
+  app.render(); app.tick(); assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status']);
+  gates[0]!.release(); await settle(); assert.equal(app.calls[1]!.url, '/plugins/codebuddy-link/refresh');
   control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
-  app.tick(); button(app.render(), '刷新账户').props.onClick(); button(app.render(), '使用 OAuth 登录').props.onClick();
-  assert.equal(app.calls.length, 2);
-  gates[1]!.release(); await settle();
-  assert.equal(app.calls[2]!.url, '/plugins/codebuddy-link/models');
-  app.tick(); button(app.render(), '获取模型列表').props.onClick();
-  assert.equal(app.calls.length, 3);
-  gates[2]!.release(); await settle();
-  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
-  assert.match(content(app.render()), /Found/);
+  app.tick(); button(app.render(), '刷新账户').props.onClick(); button(app.render(), '添加账户').props.onClick(); assert.equal(app.calls.length, 2);
+  gates[1]!.release(); await settle(); assert.equal(app.calls[2]!.url, '/plugins/codebuddy-link/models');
+  app.tick(); button(app.render(), '获取模型列表').props.onClick(); assert.equal(app.calls.length, 3);
+  gates[2]!.release(); await settle(); assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan'); assert.match(content(app.render()), /Found/);
   app.tick(); await settle(); app.tick(); await settle();
   assert.deepEqual(app.calls.slice(3).map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/status']);
   assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
 });
 
-test('invalid refreshed accounts never request models on mount or manual refresh', async () => {
-  for (const status of ['auth-required', 'unavailable', 'error']) {
-    const invalid = {...payload(), account:{status}};
-    const app = harness([{value:payload()}, {value:invalid}, {value:invalid}]);
-    app.render(); await settle();
-    assert.equal(app.calls.length, 2);
-    control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
-    button(app.render(), '刷新账户').props.onClick(); await settle();
-    assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/refresh']);
-    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
-    assert.equal(button(app.render(), '刷新账户').props.disabled, false);
-  }
-});
-
-test('mount refresh errors remain visible and polling does not retry external services', async () => {
+test('refresh failures stay visible and polling never retries external account or model services', async () => {
   for (const failedStage of ['refresh', 'models']) {
     const replies: Reply[] = [{value:payload()}];
-    if (failedStage === 'models') replies.push({value:{...payload(), account:{status:'ok', remaining:12}}});
+    if (failedStage === 'models') replies.push({value:withQuota({status:'ok', remaining:12})});
     replies.push({ok:false, status:503}, {value:payload()});
     const app = harness(replies); app.render(); await settle();
-    assert.match(content(app.render()), /HTTP 503/);
-    assert.equal(app.calls.at(-1)!.url, `/plugins/codebuddy-link/${failedStage}`);
+    assert.match(content(app.render()), /HTTP 503/); assert.equal(app.calls.at(-1)!.url, `/plugins/codebuddy-link/${failedStage}`);
     assert.equal(button(app.render(), '保存设置').props.disabled, false);
     if (failedStage === 'models') assert.match(content(app.render()), /剩余：12\.00/);
-    control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
-    app.tick(); await settle();
+    control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}}); app.tick(); await settle();
     assert.equal(app.calls.at(-1)!.url, '/plugins/codebuddy-link/status');
-    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
-    assert.match(content(app.render()), /HTTP 503/);
+    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan'); assert.match(content(app.render()), /HTTP 503/);
   }
-});
-
-test('manual model follow-up errors preserve drafts and do not report refresh success', async () => {
-  const app = mounted([{value:payload()}, {value:payload()}, {ok:false, status:502}]);
-  app.render(); await settle();
-  control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
-  button(app.render(), '刷新账户').props.onClick(); await settle();
-  assert.deepEqual(app.calls.slice(-2).map(call => call.url), ['/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/models']);
-  assert.match(content(app.render()), /HTTP 502/);
-  assert.doesNotMatch(content(app.render()), /账户状态已刷新/);
-  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
 });
 
 test('unmount at each mount-chain stage ignores late responses and starts no follow-up', async () => {
   for (const stage of [0, 1, 2]) {
     let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
     const app = harness(Array.from({length:3}, (_, index) => ({value:payload(), ...(index === stage ? {wait} : {})})));
-    app.render(); await settle();
-    assert.equal(app.calls.length, stage + 1);
-    app.cleanup.forEach(dispose => dispose()); const before = JSON.stringify(app.state);
-    release(); await settle();
-    assert.equal(JSON.stringify(app.state), before);
-    assert.equal(app.calls.length, stage + 1);
-    assert.equal(app.timers.size, 0);
+    app.render(); await settle(); assert.equal(app.calls.length, stage + 1);
+    app.cleanup.forEach(dispose => dispose()); const before = JSON.stringify(app.state); release(); await settle();
+    assert.equal(JSON.stringify(app.state), before); assert.equal(app.calls.length, stage + 1); assert.equal(app.timers.size, 0);
   }
 });
 
 test('stale mount generation cannot publish results, request models, or unlock the new mount', async () => {
   let oldRelease!: () => void; const oldWait = new Promise<void>(resolve => {oldRelease = resolve;});
   let newRelease!: () => void; const newWait = new Promise<void>(resolve => {newRelease = resolve;});
-  const app = harness([{value:payload()}, {value:{...payload(), account:{status:'ok', remaining:999}}, wait:oldWait},
-    {value:payload(), wait:newWait}, {value:{...payload(), account:{status:'auth-required'}}}]);
-  app.render(); await settle();
-  control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
-  app.remount(); const before = JSON.stringify(app.state);
-  oldRelease(); await settle(); app.tick();
-  assert.equal(JSON.stringify(app.state), before);
-  assert.equal(app.calls.length, 3);
-  newRelease(); await settle();
+  const empty = {...payload(), accountPool:{mode:'pool', accounts:[]}};
+  const app = harness([{value:payload()}, {value:withQuota({status:'ok', remaining:999}), wait:oldWait}, {value:payload(), wait:newWait}, {value:empty}]);
+  app.render(); await settle(); control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+  app.remount(); const before = JSON.stringify(app.state); oldRelease(); await settle(); app.tick();
+  assert.equal(JSON.stringify(app.state), before); assert.equal(app.calls.length, 3); newRelease(); await settle();
   assert.deepEqual(app.calls.map(call => call.url), ['/plugins/codebuddy-link/status', '/plugins/codebuddy-link/refresh', '/plugins/codebuddy-link/status', '/plugins/codebuddy-link/refresh']);
-  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
-  assert.equal(app.timers.size, 1);
+  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan'); assert.equal(app.timers.size, 1);
 });
 
-test('auth model follow-up failure is private and invalid post-login accounts skip models', async () => {
-  for (const status of ['ok', 'auth-required']) {
-    const app = mounted([{value:payload()}, {value:{configured:true}}, {value:{...payload(), account:{status}}},
-      {error:new Error('PRIVATE-AUTH-RESPONSE')}]);
-    app.render(); await settle();
-    control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
-    control(app.render(), '导入登录 JSON', 'textarea').props.onChange({target:{value:'{}'}});
-    button(app.render(), '导入登录信息').props.onClick(); await settle();
-    assert.equal(app.calls.length, status === 'ok' ? 6 : 5);
-    assert.equal(control(app.render(), '导入登录 JSON', 'textarea').props.value, '');
-    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
-    if (status === 'ok') assert.match(content(app.render()), /状态刷新失败/);
-    assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-AUTH/);
-  }
-});
-
-test('auth refresh chain keeps its lock and ignores each late follow-up after unmount', async () => {
+test('auth refresh chain holds lock and ignores each late follow-up after unmount', async () => {
   for (const stage of ['refresh', 'models']) {
     let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
-    const app = mounted([{value:payload()}, {value:{configured:true}},
+    const app = mounted([{value:payload()}, {value:startReply()}, {value:{status:'ok'}},
       {value:payload(), ...(stage === 'refresh' ? {wait} : {})}, {value:payload(), ...(stage === 'models' ? {wait} : {})}]);
-    app.render(); await settle();
-    control(app.render(), '导入登录 JSON', 'textarea').props.onChange({target:{value:'{}'}});
-    button(app.render(), '导入登录信息').props.onClick(); await settle();
-    const count = stage === 'refresh' ? 5 : 6;
-    app.tick(); button(app.render(), '刷新账户').props.onClick(); button(app.render(), '保存设置').props.onClick();
-    assert.equal(app.calls.length, count);
-    app.cleanup.forEach(dispose => dispose()); const before = JSON.stringify(app.state);
-    release(); await settle();
-    assert.equal(JSON.stringify(app.state), before);
-    assert.equal(app.calls.length, count);
+    app.render(); await settle(); button(app.render(), '添加账户').props.onClick(); await settle();
+    button(app.render(), '检查登录结果').props.onClick(); await settle(); const count = stage === 'refresh' ? 6 : 7;
+    app.tick(); button(app.render(), '刷新账户').props.onClick(); button(app.render(), '保存设置').props.onClick(); assert.equal(app.calls.length, count);
+    app.cleanup.forEach(dispose => dispose()); const before = JSON.stringify(app.state); release(); await settle();
+    assert.equal(JSON.stringify(app.state), before); assert.equal(app.calls.length, count);
   }
 });
 
-test('unmounted request cannot update state; client uses no DOM APIs and clears polling', async () => {
-  const app = harness();
-  app.render();
-  app.cleanup.forEach(dispose => dispose());
-  await settle();
-  assert.equal(app.state[0], null);
-  assert.equal(app.timers.size, 0);
-  app.tick(); assert.equal(app.calls.length, 1);
-  // The loader registration is the sole permitted window reference.
-  assert.doesNotMatch(code.replace('window.__ModuleLoader__', '__ModuleLoader__'), /\b(?:document|window|innerHTML|createPortal)\b/);
+test('unmounted account mutation cannot update state', async () => {
+  let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
+  const app = mounted([{value:payload()}, {value:withQuota({status:'ok', remaining:999}), wait}]); app.render(); await settle();
+  button(accountRow(app.render()), '刷新').props.onClick(); app.cleanup.forEach(dispose => dispose());
+  const before = JSON.stringify(app.state); release(); await settle(); assert.equal(JSON.stringify(app.state), before); assert.equal(app.calls.length, 4);
+});
+
+test('client has no unsafe HTML, persistence, logging or direct DOM access and clears polling', async () => {
+  const app = harness(); app.render(); app.cleanup.forEach(dispose => dispose()); await settle();
+  assert.equal(app.state[0], null); assert.equal(app.timers.size, 0); app.tick(); assert.equal(app.calls.length, 1);
+  assert.doesNotMatch(code.replace('window.__ModuleLoader__', '__ModuleLoader__'), /\b(?:document|window|innerHTML|createPortal|localStorage|console|dangerouslySetInnerHTML)\b/);
 });

@@ -96,7 +96,7 @@ test('actual provider and ask argv share effort inheritance, override and explic
   await assert.rejects(f.ask('ARGV',{reasoningEffort:'invalid'}),/Unsupported reasoning effort/)
   assert.equal(f.runs().length,count)
   await f.update({reasoningEffort:'max',queueTimeoutMs:60000})
-  assert.equal(f.tool.timeoutMs,75000)
+  assert.equal(f.tool.timeoutMs,135000, 'host envelope covers both account and global queue budgets')
   assert.equal(effort(JSON.parse(await f.ask('ARGV'))),'max')
   assert.equal(effort(JSON.parse((await f.model()).text)),'max')
   await f.update({queueTimeoutMs:2147483647})
