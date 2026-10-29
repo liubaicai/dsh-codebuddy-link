@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.23
+
+- Change ACP timeout from a total execution deadline to an inactivity watchdog. Valid text, thought and active-tool updates renew the budget, so progressing tasks can exceed ten minutes. Keep idle timeout cancellation/process cleanup, ignore stderr and unrelated metadata as keepalives, and stop the watchdog at prompt completion. Print-mode delegation/background deadlines remain unchanged.
+
 ## 0.3.22
 
 - Accept validated non-executing ACP session metadata after prompt completion regardless of stream grouping, while rejecting late execution, mismatched sessions and duplicate replies. Preserve all message text instead of assuming a new message ID replaces the answer.

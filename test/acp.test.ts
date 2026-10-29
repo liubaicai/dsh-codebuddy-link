@@ -100,6 +100,22 @@ input.on('line', line => {
   const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',detached:process.platform==='win32'});
   writeFileSync('child.pid',String(child.pid));text('done');return reply(row.id,{stopReason:'end_turn'});
  }
+ if(mode.startsWith('progress:')) {
+  const kind=mode.slice(9);let count=0;
+  if(kind==='tool')update({sessionUpdate:'tool_call',toolCallId:'long-tool',status:'pending'});
+  const tick=setInterval(()=>{
+   count++;
+   if(kind==='tool')update({sessionUpdate:'tool_call_update',toolCallId:'long-tool',status:'in_progress',rawOutput:'working '+count});
+   else if(kind==='thought')update({sessionUpdate:'agent_thought_chunk',content:{type:'text',text:'thinking'}});
+   else text('working');
+   if(count===12){clearInterval(tick);if(kind!=='stall')reply(row.id,{stopReason:'end_turn'});}
+  },200);
+  return;
+ }
+ if(mode==='noise') {
+  setInterval(()=>{process.stderr.write('private diagnostic');text('');update({sessionUpdate:'session_info_update',title:'unchanged'});send({jsonrpc:'2.0',method:'unknown_notification'});},100);
+  return;
+ }
  if(mode === 'idle')return;
  update({sessionUpdate:'agent_thought_chunk',content:{type:'text',text:'thinking'}});
  update({sessionUpdate:'tool_call',toolCallId:'native-1',title:'Read',kind:'read',status:'pending',rawInput:{path:'a'}});
@@ -314,6 +330,65 @@ test('active cancellation sends session/cancel, kills process tree and removes s
   assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
   await dead(pid);
   await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));
+});
+
+test('ACP progress renews the idle budget for text, thoughts and in-progress tools', {timeout:30000}, async t => {
+  for (const kind of ['text','thought','tool']) {
+    const f = await fixture(t);
+    const start = Date.now();
+    const events = await collect(runCodeBuddyAcp({...f,prompt:`progress:${kind}`,timeoutMs:1500}));
+    assert.ok(Date.now()-start > 1500, 'task must outlive the old total deadline');
+    const result = events.at(-1);
+    assert.equal(result?.type, 'result');
+    if (kind==='text') assert.equal(result?.type==='result' && result.text, 'working'.repeat(12));
+    await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
+  }
+});
+
+test('ACP times out after progress stops, not from the original start time', {timeout:15000}, async t => {
+  const f = await fixture(t);
+  let chunks = 0;
+  let lastProgress = 0;
+  await assert.rejects(async () => {
+    for await (const event of runCodeBuddyAcp({...f,prompt:'progress:stall',timeoutMs:1500})) {
+      if (event.type==='text') { chunks++; lastProgress=Date.now(); }
+    }
+  }, {name:'TimeoutError',message:'CodeBuddy ACP request timed out after 1500ms without progress'});
+  assert.equal(chunks,12);
+  assert.ok(Date.now()-lastProgress >= 1400);
+  assert.equal(await readFile(join(f.cwd,'cancelled'),'utf8'),'yes');
+  await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
+});
+
+test('stderr, empty text and unrelated metadata do not renew the ACP idle budget', {timeout:15000}, async t => {
+  const f = await fixture(t);
+  await assert.rejects(collect(runCodeBuddyAcp({...f,prompt:'noise',timeoutMs:1500})), {name:'TimeoutError'});
+  await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
+});
+
+test('ACP completion stops the idle watchdog while the consumer holds a streamed event', {timeout:15000}, async t => {
+  const f = await fixture(t);
+  const events: BridgeEvent[] = [];
+  let held = false;
+  for await (const event of runCodeBuddyAcp({...f,prompt:'messages',timeoutMs:1500})) {
+    events.push(event);
+    if (!held && event.type==='text') { held=true; await delay(2200); }
+  }
+  assert.ok(held);
+  assert.equal(events.at(-1)?.type,'result');
+});
+
+test('explicit cancellation still stops an ACP task with ongoing progress', {timeout:15000}, async t => {
+  const f = await fixture(t);
+  const controller = new AbortController();
+  await assert.rejects(async () => {
+    for await (const event of runCodeBuddyAcp({...f,prompt:'progress:text',timeoutMs:1500,signal:controller.signal})) {
+      if (event.type==='text') controller.abort();
+    }
+  }, {name:'AbortError'});
+  assert.equal(getEventListeners(controller.signal,'abort').length,0);
+  assert.equal(await readFile(join(f.cwd,'cancelled'),'utf8'),'yes');
+  await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
 });
 
 test('timeout sends cancellation and cleans up the process tree', async t => {

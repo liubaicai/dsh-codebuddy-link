@@ -25,6 +25,8 @@ export async function* runCodeBuddyAcp(request) {
         throw abortError();
     if (typeof request.prompt !== 'string' || typeof request.cwd !== 'string' || !request.cwd)
         throw new TypeError('prompt and cwd are required');
+    // ACP tasks may run indefinitely while making progress. This is an idle
+    // budget, not a wall-clock deadline; print-mode delegation keeps its own budget.
     const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT;
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647)
         throw new RangeError('timeoutMs must be a positive finite timer duration');
@@ -71,6 +73,10 @@ export async function* runCodeBuddyAcp(request) {
     let termination;
     let cleanupFailure;
     const notify = () => { const resolve = wake; wake = undefined; resolve?.(); };
+    const progress = () => {
+        if (!stopping && !failure && !promptResponded)
+            timer.refresh();
+    };
     const rejectPending = (error) => {
         for (const entry of pending.values())
             entry.reject(error);
@@ -208,6 +214,7 @@ export async function* runCodeBuddyAcp(request) {
                 output += delta;
             }
             push({ type, delta });
+            progress();
         }
         else if (row.sessionUpdate === 'tool_call' || row.sessionUpdate === 'tool_call_update') {
             if (typeof row.toolCallId !== 'string' || !row.toolCallId)
@@ -226,6 +233,10 @@ export async function* runCodeBuddyAcp(request) {
                 tools.set(row.toolCallId, tool);
                 push({ type: 'tool-start', id: row.toolCallId, name: tool.name, ...(owns(row, 'rawInput') ? { input: row.rawInput } : {}) });
             }
+            // In-progress tool updates can carry output without emitting a new bridge
+            // event. Count them too, but not repeated updates to an already-ended tool.
+            if (!tool.ended)
+                progress();
             if (!tool.ended && (row.status === 'completed' || row.status === 'failed')) {
                 tool.ended = true;
                 push({ type: 'tool-end', id: row.toolCallId, name: tool.name, ...(owns(row, 'rawOutput') ? { output: row.rawOutput } : owns(row, 'content') ? { output: row.content } : {}), isError: row.status === 'failed' });
@@ -293,8 +304,14 @@ export async function* runCodeBuddyAcp(request) {
                     throw protocolError();
                 sessionId = value.result.sessionId;
             }
-            if (entry.method === 'session/prompt')
+            // A matched setup response starts the next phase's idle budget. Prompt
+            // completion ends the watchdog even if the consumer is draining events.
+            if (entry.method === 'session/prompt') {
                 promptResponded = true;
+                clearTimeout(timer);
+            }
+            else
+                progress();
             pending.delete(value.id);
             entry.resolve(value.result);
         }
@@ -346,7 +363,10 @@ export async function* runCodeBuddyAcp(request) {
         }
     };
     const onAbort = () => fail(abortError());
-    const timer = setTimeout(() => fail(Object.assign(new Error(`CodeBuddy ACP request timed out after ${timeoutMs}ms`), { name: 'TimeoutError' })), timeoutMs);
+    // Only validated text/thought/tool progress and matched setup replies renew
+    // this watchdog: stderr, partial frames and unrelated metadata cannot keep a
+    // stalled task alive. Explicit cancellation and bounded cleanup stay unchanged.
+    const timer = setTimeout(() => fail(Object.assign(new Error(`CodeBuddy ACP request timed out after ${timeoutMs}ms without progress`), { name: 'TimeoutError' })), timeoutMs);
     request.signal?.addEventListener('abort', onAbort, { once: true });
     child.once('spawn', onSpawn);
     child.on('error', onProcessError);
