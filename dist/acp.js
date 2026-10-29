@@ -9,6 +9,11 @@ import { childEnv, killTree, resolveCodeBuddyBin } from "./runner.js";
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const validId = (value) => typeof value === 'string' || (typeof value === 'number' && Number.isSafeInteger(value));
+/** Selects the CLI's own allow-once style option; kind strings are not normalized across versions. */
+const allowOptionId = (value) => typeof value.optionId === 'string' && value.optionId
+    && ((value.optionId === 'allow_once' || value.optionId === 'always_allow' || value.optionId === 'yes')
+        || (typeof value.kind === 'string' && value.kind.startsWith('allow')))
+    ? value.optionId : undefined;
 const protocolError = () => new Error('Invalid CodeBuddy ACP protocol message (content omitted)');
 const abortError = () => Object.assign(new Error('CodeBuddy ACP request aborted'), { name: 'AbortError' });
 const DEFAULT_TIMEOUT = 10 * 60 * 1000;
@@ -265,8 +270,18 @@ export async function* runCodeBuddyAcp(request) {
                 if (value.method === 'session/request_permission') {
                     if (!sessionId || params.sessionId !== sessionId || !object(params.toolCall) || !Array.isArray(params.options))
                         throw protocolError();
+                    // The saved yolo setting is an explicit user decision for this bridge:
+                    // approve residual prompts when skipping is enabled, deny each one
+                    // otherwise. Never synthesize an option the CLI did not offer.
+                    if (request.dangerouslySkipPermissions) {
+                        const optionId = params.options.map(item => object(item) ? allowOptionId(item) : undefined).find(id => id !== undefined);
+                        if (!optionId)
+                            throw protocolError();
+                        send({ jsonrpc: '2.0', id: value.id, result: { outcome: { outcome: 'selected', optionId } } });
+                        return;
+                    }
                     send({ jsonrpc: '2.0', id: value.id, result: { outcome: { outcome: 'cancelled' } } });
-                    fail(new Error('CodeBuddy ACP permission request cancelled: this non-interactive bridge never approves residual permission prompts, including HIGH/CRITICAL actions. Review and run the action in an interactive CodeBuddy session.'));
+                    fail(new Error('CodeBuddy ACP permission request denied: enable the skip-permissions setting to allow residual prompts in this non-interactive bridge, or run the action in an interactive CodeBuddy session.'));
                 }
                 else {
                     send({ jsonrpc: '2.0', id: value.id, error: { code: -32601, message: 'Method not found' } });

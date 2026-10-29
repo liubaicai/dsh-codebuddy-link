@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.25
+
+- Honor the skip-permissions setting for residual ACP `session/request_permission` prompts: approve once using the CLI-provided allow option and continue the task when enabled; deny and fail with an actionable message when disabled. Never synthesize an option the CLI did not offer.
+
 ## 0.3.24
 
 - Preserve completed ACP answers for `end_turn + PARTIAL_SUCCESS` with nonblank text instead of treating CLI task-quality warnings as fatal. Show a fixed visible partial-success notice without exposing raw error details or replaying work. Keep failed/unknown outcomes, other stop reasons, empty partial results and cleanup failures fail-closed.

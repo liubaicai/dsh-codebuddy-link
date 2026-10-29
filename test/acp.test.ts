@@ -86,6 +86,17 @@ input.on('line', line => {
   return;
  }
  if (mode === 'permission') return send({jsonrpc:'2.0',id:'permission-1',method:'session/request_permission',params:{sessionId:'fresh-session',toolCall:{toolCallId:'p',title:'SECRET_TOKEN HIGH CRITICAL'},options:[{optionId:'yes',name:'Allow',kind:'allow_once'}]}});
+ if (mode.startsWith('permission-flow')) {
+  const variant=mode.split(':')[1];
+  const options = variant==='named' ? [{optionId:'allow',name:'Allow',kind:'allow'},{optionId:'deny',name:'Deny',kind:'deny_once'}]
+   : variant==='none' ? [{optionId:'maybe',name:'Maybe',kind:'other'}]
+    : variant==='deny-only' ? [{optionId:'no',name:'Deny',kind:'deny_once'}]
+    : [{optionId:'no',name:'Deny',kind:'deny_once'},{optionId:'yes',name:'Allow',kind:'allow_once'}];
+  send({jsonrpc:'2.0',id:'permission-1',method:'session/request_permission',params:{sessionId:'fresh-session',toolCall:{toolCallId:'p',title:'Read'},options}});
+  input.once('line',line=>{const r=JSON.parse(line);appendFileSync('permission-reply.ndjson',line+'\n');
+   if(r.id==='permission-1'){update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:' proceeded'}});reply(row.id,{stopReason:'end_turn'});}});
+  return;
+ }
  if (mode === 'unknown') return send({jsonrpc:'2.0',id:'host-1',method:'terminal/create',params:{command:'must never execute'}});
  if (['hang','yield-tree','tree','orphan'].includes(mode)) {
   const child = spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',detached:mode==='orphan' && process.platform==='win32'});
@@ -282,14 +293,34 @@ test('ACP inherits authentication through childEnv', async t => {
   assert.equal(events.at(-1)?.type === 'result' ? (events.at(-1) as { text: string }).text : undefined, 'test-token');
 });
 
-test('permission requests fail closed even with explicit bypass and emit cancelled outcome before cleanup', async t => {
-  for (const dangerouslySkipPermissions of [false, true]) {
+test('without skip-permissions a residual prompt is denied and the turn fails closed', async t => {
+  const f = await fixture(t);
+  await assert.rejects(collect(runCodeBuddyAcp({ ...f, prompt: 'permission', dangerouslySkipPermissions: false })), error => error instanceof Error && /permission request denied/.test(error.message) && !error.message.includes('SECRET_TOKEN'));
+  const rows = await wire(f.cwd);
+  assert.ok(rows.some(row => row.id === 'permission-1' && row.result?.outcome?.outcome === 'cancelled'));
+  assert.ok(rows.some(row => row.method === 'session/cancel'));
+  assert.equal(rows.some(row => row.result?.outcome?.optionId === 'yes'), false);
+  await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));
+});
+
+test('with skip-permissions a residual prompt is approved once and the task continues', async t => {
+  for (const variant of ['default','named']) {
     const f = await fixture(t);
-    await assert.rejects(collect(runCodeBuddyAcp({ ...f, prompt: 'permission', dangerouslySkipPermissions })), error => error instanceof Error && /permission request cancelled/.test(error.message) && !error.message.includes('SECRET_TOKEN'));
+    const events = await collect(runCodeBuddyAcp({ ...f, prompt: `permission-flow:${variant}`, dangerouslySkipPermissions: true }));
     const rows = await wire(f.cwd);
-    assert.ok(rows.some(row => row.id === 'permission-1' && row.result?.outcome?.outcome === 'cancelled'));
-    assert.ok(rows.some(row => row.method === 'session/cancel'));
-    assert.equal(rows.some(row => row.result?.outcome?.optionId === 'yes'), false);
+    const reply = JSON.parse(await readFile(join(f.cwd, 'permission-reply.ndjson'), 'utf8'));
+    const optionId = variant === 'named' ? 'allow' : 'yes';
+    assert.deepEqual(reply, { jsonrpc: '2.0', id: 'permission-1', result: { outcome: { outcome: 'selected', optionId } } });
+    assert.equal(rows.some(row => row.method === 'session/cancel'), false);
+    assert.deepEqual(events.at(-1), { type: 'result', sessionId: 'fresh-session', text: ' proceeded' });
+    await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));
+  }
+});
+
+test('skip-permissions approval requires a real allow option from the CLI', async t => {
+  for (const variant of ['none','deny-only']) {
+    const f = await fixture(t);
+    await assert.rejects(collect(runCodeBuddyAcp({ ...f, prompt: `permission-flow:${variant}`, dangerouslySkipPermissions: true })), /Invalid or oversized CodeBuddy ACP stream/);
     await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));
   }
 });
