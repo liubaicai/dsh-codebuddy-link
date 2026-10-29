@@ -43,7 +43,7 @@ export function apply(ctx: Context, entry: Record<string, unknown> = {}): void {
     const sessions = ctx.get('sessions') as {get(id: unknown): {header?: {cwd?: string}} | undefined} | undefined
     return sessions?.get(id)?.header?.cwd
   }
-  if (config.enabled) ctx.llm.registerAdapter(['codebuddy'], new CodeBuddyAdapter(config, runCodeBuddy, sessionCwd, readAuthToken, runtime))
+  if (config.enabled) ctx.llm.registerAdapter(['codebuddy'], new CodeBuddyAdapter(config, undefined, sessionCwd, readAuthToken, runtime))
   ctx.commands.register({
     name: 'codebuddy', description: 'CodeBuddy bridge status, models and setup',
     input: { hint: '<status|models|runs|help>' },
@@ -54,7 +54,8 @@ export function apply(ctx: Context, entry: Record<string, unknown> = {}): void {
         '**CodeBuddy bridge**', `Enabled: ${config.enabled}`, `CLI: ${config.codebuddyBin || 'codebuddy (PATH)'}`,
         `Model: ${config.defaultModel}`, `Default effort: ${config.reasoningEffort} (server reasoning unconfirmed)`,
         `Concurrency: ${config.maxConcurrency}; queue timeout: ${config.queueTimeoutMs}ms; no-progress warning: ${config.stallWarnMs}ms`,
-        'Provider tools: DSH-managed; CodeBuddy built-in tools disabled',
+        'Execution mode: autonomous (ACP stdio, fixed)',
+        `Provider transport: ACP stdio; CodeBuddy native default tools; outside DSH sandbox; skip permissions: ${config.dangerouslySkipPermissions}`,
         `Delegation tools: ${config.tools || 'disabled'} (${config.permissionMode})`,
         `Workspace: ${config.workspaceRoot || 'DSH session workspace'}`,
         'Authentication: the saved CodeBuddy plugin credential is passed to the CLI automatically; otherwise the CLI uses its own login. This status does not verify login.',

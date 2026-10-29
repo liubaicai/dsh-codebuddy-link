@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.20
+
+- Connect autonomous execution through ACP stdio (`initialize`, `session/new`, `session/prompt`, `session/update`, `session/cancel`) instead of print streams. Use a fresh session with each DSH history projection, bind both process/session cwd, never auto-fallback/replay, deny residual permission prompts, and validate bounded JSON-RPC messages with cancellation/process-tree cleanup.
+- Make ACP the fixed provider transport, removing the execution-mode switch. Ignore retired `executionMode` config/environment values and strip the saved key on the next settings save; tolerate stale UI patches without restoring bridge mode. Keep CodeBuddy's native system prompt and default tools, append host task context, and return progress plus the final answer without parsing DSH tool envelopes or replaying native operations. Require an explicit/session workspace; housekeeping remains tool-free print mode.
+- Keep `dangerouslySkipPermissions` as an independent, default-off setting: pass `--dangerously-skip-permissions` only for ACP provider calls, without a conflicting permission mode. Independent `codebuddy_ask` retains its existing permissions. CLI HIGH/CRITICAL restrictions can still apply.
+- Update UI/API/status and documentation for fixed ACP, sandbox and cancellation limitations; add config migration, prompt, process-argv, final-result, error/cancellation and settings regressions.
+
 ## 0.3.19
 
 - Normalize valid historical tool arguments to objects in prompt projections, without rewriting stored history. Put the serialization-only transport contract at system priority and request independent NDJSON records rather than one deeply nested batch envelope. Preserve legacy response formats and atomic fail-closed parsing; no JSON repair, automatic retries or schema-mode billing changes.

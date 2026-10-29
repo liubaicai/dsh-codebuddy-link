@@ -44,25 +44,30 @@ test('DSML fails closed for unknown tools, partial calls and ambiguous syntax', 
   assert.equal(Object.hasOwn(Object.prototype, 'polluted'), false)
 })
 
-test('adapter maps real DSML response to DSH calls, suppresses raw markers and completes next step', async () => {
+test('fixed ACP adapter preserves DSML and JSON finals verbatim without replaying DSH calls', async () => {
   let step = 0
+  const finals = [raw, '{"text":"检查完成","toolCalls":[]}']
   const runner: Runner = async function* (request) {
-    assert.equal(request.tools, '')
+    assert.equal(request.cwd, process.cwd())
+    assert.equal(request.tools, 'default')
     assert.equal(request.permissionMode, 'dontAsk')
     assert.equal(request.jsonSchema, undefined)
-    const text = step++ === 0 ? raw : '{"text":"检查完成","toolCalls":[]}'
+    assert.equal(request.systemPrompt, undefined)
+    assert.doesNotMatch(request.prompt, /Available DSH tools:|DSH transport contract/)
+    const text = finals[step++]!
     yield {type: 'text', delta: text}
     yield {type: 'result', text}
   }
-  const adapter = new CodeBuddyAdapter(resolveConfig({}, {}), runner)
-  const out: StreamChunk[] = []
-  for await (const c of adapter.stream({provider:'codebuddy',model:'default',messages:[],tools})) out.push(c)
-  assert.equal(out.filter(c => c.type === 'tool-call-delta').length, 2)
-  assert.equal(out.filter(c => c.type === 'text-delta').length, 0)
-  const finish = out.at(-1)
-  assert.equal(finish?.type === 'finish' && finish.reason.kind, 'tool-calls')
-  const next: StreamChunk[] = []
-  for await (const c of adapter.stream({provider:'codebuddy',model:'default',messages:[],tools})) next.push(c)
-  const last = next.at(-1)
-  assert.equal(last?.type === 'finish' && last.reason.kind, 'stop')
+  const adapter = new CodeBuddyAdapter(resolveConfig({workspaceRoot:process.cwd()}, {}), runner)
+  for (const expected of finals) {
+    const out: StreamChunk[] = []
+    for await (const c of adapter.stream({provider:'codebuddy',model:'default',messages:[],tools})) out.push(c)
+    assert.deepEqual(out.filter(c => c.type === 'text-delta').map(c => c.text), [expected])
+    assert.deepEqual(out.filter(c => c.type === 'reasoning-delta').map(c => c.text), [expected])
+    assert.equal(out.filter(c => c.type === 'tool-call-delta' || c.type === 'block-start' && c.blockType === 'tool-call' || c.type === 'block-end' && c.block.type === 'tool-call').length, 0)
+    assert.equal(out.filter(c => c.type === 'finish').length, 1)
+    const finish = out.at(-1)
+    assert.equal(finish?.type === 'finish' && finish.reason.kind, 'stop')
+  }
+  assert.equal(step, 2)
 })

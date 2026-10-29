@@ -10,6 +10,9 @@ export interface PluginConfig {
     workspaceRoot: string;
     permissionMode: 'dontAsk' | 'plan' | 'acceptEdits';
     tools: string;
+    /** Fixed: provider calls always run through ACP autonomous execution. */
+    executionMode: 'autonomous';
+    dangerouslySkipPermissions: boolean;
     timeoutMs: number;
     reasoningEffort: string;
     maxConcurrency: number;

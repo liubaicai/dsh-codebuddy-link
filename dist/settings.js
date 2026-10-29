@@ -4,7 +4,10 @@ import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveConfig } from "./config.js";
 const editable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'tools', 'modelContext',
-    'reasoningEffort', 'maxConcurrency', 'queueTimeoutMs', 'stallWarnMs']);
+    'reasoningEffort', 'maxConcurrency', 'queueTimeoutMs', 'stallWarnMs', 'dangerouslySkipPermissions']);
+/** Keys written by older plugin versions. They are dropped on load so saved
+ *  settings keep working after the setting was removed; never editable again. */
+const retired = new Set(['executionMode']);
 export function settingsPath() {
     return join(process.env.DSH_HOME || join(homedir(), '.dsh'), 'plugins', 'dsh-codebuddy-link', 'settings.json');
 }
@@ -25,11 +28,11 @@ export class SettingsStore {
             if (error.code !== 'ENOENT')
                 throw new Error('Cannot read CodeBuddy settings; repair or remove the plugin settings file');
         }
-        this.saved = validateKeys(saved);
+        this.saved = withoutRetired(validateKeys(saved));
         this.config = resolveConfig({ ...entry, ...this.saved });
     }
     update(patch) {
-        const updates = validateKeys(patch);
+        const updates = withoutRetired(validateKeys(patch));
         const saved = { ...this.saved, ...updates };
         const next = resolveConfig({ ...this.entry, ...saved });
         if (next.hiddenModels.includes(next.defaultModel))
@@ -50,8 +53,15 @@ function validateKeys(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value))
         throw new Error('Settings must be an object');
     for (const key of Object.keys(value))
-        if (!editable.has(key))
+        if (!editable.has(key) && !retired.has(key))
             throw new Error(`Unsupported setting: ${key}`);
     return value;
+}
+function withoutRetired(value) {
+    const next = {};
+    for (const [key, entry] of Object.entries(value))
+        if (!retired.has(key))
+            next[key] = entry;
+    return next;
 }
 //# sourceMappingURL=settings.js.map

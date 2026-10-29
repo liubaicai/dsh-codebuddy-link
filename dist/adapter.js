@@ -1,42 +1,11 @@
-import { randomUUID } from 'node:crypto';
 import { isAbsolute } from 'node:path';
-import { LlmAdapter, ToolCallId } from '@deepseek-ai/dsh-llm';
+import { LlmAdapter } from '@deepseek-ai/dsh-llm';
 import { CODEBUDDY_EFFORTS } from "./config.js";
 import { resolveEffort } from "./effort.js";
 import { CallRuntime } from "./runtime.js";
-import { buildPrompt, buildSystemPrompt, parseResponse } from "./prompt.js";
+import { autonomousSystemPrompt, buildPrompt, buildSystemPrompt } from "./prompt.js";
 import { runCodeBuddy } from "./runner.js";
-/** Display only model output, never prompts, credentials, stderr or raw transport events.
- * A longer-than-content Markdown fence prevents model-supplied fences/HTML from
- * turning this diagnostic into rendered instructions. Failure remains terminal. */
-function failedResponseText(resultText, streamedText, structuredOutput) {
-    const sections = ['CodeBuddy 响应解析失败。本次未执行任何工具调用。以下是完整原始回复，仅供排查；分享前请检查敏感信息。'];
-    const fence = (label, value) => {
-        let length = 3;
-        for (const match of value.matchAll(/`+/g))
-            length = Math.max(length, match[0].length + 1);
-        const marker = '`'.repeat(length);
-        sections.push(`${label}\n\n${marker}text\n${value}\n${marker}`);
-    };
-    const body = resultText || streamedText;
-    if (body)
-        fence('原始回复', body);
-    if (structuredOutput !== undefined && structuredOutput !== null) {
-        // structured_output is already decoded by NDJSON; show a lossless JSON
-        // representation of that value, not a claimed copy of transport bytes.
-        try {
-            const serialized = typeof structuredOutput === 'string' ? structuredOutput : JSON.stringify(structuredOutput, null, 2);
-            if (serialized !== undefined && serialized !== body)
-                fence('结构化返回值（解析输入）', serialized);
-        }
-        catch {
-            sections.push('结构化返回值无法序列化；保留原解析错误。');
-        }
-    }
-    if (!body && structuredOutput == null)
-        sections.push('原始回复为空。');
-    return sections.join('\n\n');
-}
+import { runCodeBuddyAcp } from "./acp.js";
 export { CODEBUDDY_EFFORTS } from "./config.js";
 const EFFORT_LABELS = { auto: 'CLI 默认', minimal: '极简', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最大', ultracode: 'ultracode' };
 export class CodeBuddyAdapter extends LlmAdapter {
@@ -45,7 +14,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
     sessionCwd;
     authToken;
     runtime;
-    constructor(config, runner = runCodeBuddy, sessionCwd = () => undefined, authToken, runtime = new CallRuntime(config)) {
+    constructor(config, runner = undefined, sessionCwd = () => undefined, authToken, runtime = new CallRuntime(config)) {
         super();
         this.config = config;
         this.runner = runner;
@@ -89,30 +58,22 @@ export class CodeBuddyAdapter extends LlmAdapter {
         const selectedModel = options.model || cfg.defaultModel;
         if (!cfg.models.includes(selectedModel) || cfg.hiddenModels.includes(selectedModel))
             throw new Error('CodeBuddy model is not enabled in settings');
-        const tools = options.purpose ? [] : options.tools ?? [];
-        const structured = tools.length > 0;
-        const cwd = cfg.workspaceRoot || (options.sessionId ? this.sessionCwd(options.sessionId) : undefined) || process.cwd();
+        // Host housekeeping (titles/compaction/etc.) must never acquire native tools.
+        const autonomous = !options.purpose;
+        const workspace = cfg.workspaceRoot || (options.sessionId ? this.sessionCwd(options.sessionId) : undefined);
+        if (autonomous && !workspace)
+            throw new Error('CodeBuddy autonomous execution requires a session workspace or explicit workspaceRoot');
+        const cwd = workspace || process.cwd();
         if (!isAbsolute(cwd))
             throw new Error('CodeBuddy workspace must be an absolute path');
-        const prompt = buildPrompt(options.messages, tools, cfg.maxPromptChars);
+        const prompt = buildPrompt(options.messages, [], cfg.maxPromptChars, autonomous);
         let index = 0;
         let open;
         let accumulated = '';
         let rawText = '';
         let resultText = '';
-        let structuredOutput;
         let usage;
         let sessionId;
-        let parseFailed = false;
-        const parse = (value) => {
-            try {
-                return parseResponse(value, tools);
-            }
-            catch (error) {
-                parseFailed = true;
-                throw error;
-            }
-        };
         const close = () => {
             if (!open)
                 return [];
@@ -136,73 +97,52 @@ export class CodeBuddyAdapter extends LlmAdapter {
             return chunks;
         };
         try {
-            // Request independent JSON records through the transport contract, NOT
-            // --json-schema: on CLI 2.177.1 that mode inflated billed input ~4-8x
-            // and sometimes refused its internal StructuredOutput tool. Prompting is
-            // not constrained decoding: malformed responses still fail atomically.
+            // Native ACP operations are executed by the CLI. Never request or parse
+            // DSH tool envelopes, including for restricted housekeeping calls.
             for await (const event of this.runtime.run({
-                prompt, systemPrompt: buildSystemPrompt(options.system, structured), cwd, bin: cfg.codebuddyBin || undefined,
+                prompt,
+                // Keep CodeBuddy's native system prompt/tool guidance in autonomous mode.
+                ...(autonomous ? { appendSystemPrompt: autonomousSystemPrompt(options.system) } : { systemPrompt: buildSystemPrompt(options.system, false) }),
+                cwd, bin: cfg.codebuddyBin || undefined,
                 model: (options.model || cfg.defaultModel) === 'default' ? undefined : (options.model || cfg.defaultModel),
-                effort: resolveEffort(options.reasoningEffort, cfg.reasoningEffort), permissionMode: 'dontAsk', tools: '',
+                effort: resolveEffort(options.reasoningEffort, cfg.reasoningEffort),
+                permissionMode: autonomous ? cfg.permissionMode : 'dontAsk', tools: autonomous ? 'default' : '',
+                ...(autonomous ? { dangerouslySkipPermissions: cfg.dangerouslySkipPermissions } : {}),
                 timeoutMs: cfg.timeoutMs, signal: options.signal, authToken: await this.resolveAuthToken(),
-            }, 'model', this.runner, structured ? event => {
-                // Validation runs before the runtime yields result: retain the exact
-                // parse input first so failed validation cannot hide the final reply.
-                resultText = event.text;
-                structuredOutput = event.structuredOutput;
-                parse(structuredOutput ?? (resultText || rawText));
-            } : undefined)) {
+            }, 'model', this.runner ?? (autonomous ? runCodeBuddyAcp : runCodeBuddy))) {
                 if (event.type === 'text') {
                     rawText += event.delta;
-                    if (!structured)
-                        yield* append('text', event.delta);
+                    yield* append(autonomous ? 'reasoning' : 'text', event.delta);
                 }
-                else if (event.type === 'reasoning' && !structured)
+                else if (event.type === 'reasoning')
                     yield* append('reasoning', event.delta);
+                else if (autonomous && (event.type === 'tool-start' || event.type === 'tool-end')) {
+                    // Progress only: never replay a native CLI operation as a DSH tool call,
+                    // and never expose tool arguments/results as diagnostic metadata.
+                    const name = event.name && /^[\w.-]{1,100}$/.test(event.name) ? event.name : 'native-tool';
+                    yield* append('reasoning', `\n[CodeBuddy ${event.type === 'tool-start' ? '执行' : event.isError ? '失败' : '完成'}: ${name}]\n`);
+                }
                 else if (event.type === 'usage')
                     usage = { inputTokens: event.input, outputTokens: event.output, cacheReadTokens: event.cacheRead, cacheWriteTokens: event.cacheWrite };
                 else if (event.type === 'result') {
                     sessionId = event.sessionId;
                     resultText = event.text;
-                    structuredOutput = event.structuredOutput;
                 }
             }
-            if (structured) {
-                const response = parse(structuredOutput ?? (resultText || rawText));
-                yield* append('text', response.text);
-                yield* close();
-                for (const call of response.toolCalls) {
-                    const id = ToolCallId('codebuddy-' + randomUUID());
-                    yield { type: 'block-start', index, blockType: 'tool-call' };
-                    yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.arguments };
-                    yield { type: 'block-end', index, block: { type: 'tool-call', id, name: call.name, arguments: call.arguments } };
-                    index++;
-                }
-                if (usage)
-                    yield { type: 'usage', usage };
-                yield { type: 'finish', reason: { kind: response.toolCalls.length ? 'tool-calls' : 'stop' }, replayState: { response: { sessionId: sessionId ?? null } } };
-            }
-            else {
-                if (!rawText && resultText)
-                    yield* append('text', resultText);
-                yield* close();
-                if (usage)
-                    yield { type: 'usage', usage };
-                yield { type: 'finish', reason: { kind: 'stop' }, replayState: { response: { sessionId: sessionId ?? null } } };
-            }
+            if (autonomous)
+                yield* append('text', resultText || rawText);
+            else if (!rawText && resultText)
+                yield* append('text', resultText);
+            yield* close();
+            if (usage)
+                yield { type: 'usage', usage };
+            yield { type: 'finish', reason: { kind: 'stop' }, replayState: { response: { sessionId: sessionId ?? null } } };
         }
         catch (error) {
             yield* close();
-            const diagnostic = parseFailed && !options.signal?.aborted ? failedResponseText(resultText, rawText, structuredOutput) : '';
-            if (diagnostic) {
-                yield* append('text', diagnostic);
-                yield* close();
-            }
             if (usage)
                 yield { type: 'usage', usage };
-            // Error finishes can move streamed text into a hidden assistant/attempt.
-            // Put the same complete diagnostic in the error channel the host displays.
-            const message = [error instanceof Error ? error.message : String(error), diagnostic].filter(Boolean).join('\n\n');
+            const message = error instanceof Error ? error.message : String(error);
             yield { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: { code: options.signal?.aborted ? 'ABORTED' : 'CODEBUDDY_ERROR', message } } };
         }
     }

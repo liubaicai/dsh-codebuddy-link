@@ -10,7 +10,7 @@ export declare class CodeBuddyAdapter extends LlmAdapter {
     private readonly sessionCwd;
     private readonly authToken;
     private readonly runtime;
-    constructor(config: PluginConfig, runner?: Runner, sessionCwd?: (id: string) => string | undefined, authToken?: () => Promise<string | undefined>, runtime?: CallRuntime);
+    constructor(config: PluginConfig, runner?: Runner | undefined, sessionCwd?: (id: string) => string | undefined, authToken?: () => Promise<string | undefined>, runtime?: CallRuntime);
     /** Saved plugin credential, when present and readable, authenticates the CLI child. */
     private resolveAuthToken;
     providerInfo(): {

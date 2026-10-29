@@ -37,6 +37,18 @@ test('argv stays literal, disables tools, supplies optional schema and never res
   assert.equal(args[args.indexOf('--json-schema') + 1], '{"type":"object"}');
   assert.ok(!args.includes('--resume') && !args.includes('--continue'));
 });
+test('native execution sends exact tools, append prompt and explicit bypass without permission-mode conflict', async t => {
+  const f = await fixture(t);
+  const events = await collect(runCodeBuddy({ ...f, prompt: 'argv', tools: 'default', appendSystemPrompt: 'native guidance', dangerouslySkipPermissions: true }));
+  const result = events.at(-1);
+  assert.equal(result?.type, 'result');
+  if (result?.type !== 'result') return;
+  const args: string[] = JSON.parse(result.text);
+  assert.equal(args[args.indexOf('--tools') + 1], 'default');
+  assert.equal(args[args.indexOf('--append-system-prompt') + 1], 'native guidance');
+  assert.ok(args.includes('--dangerously-skip-permissions'));
+  for (const flag of ['--permission-mode', '--system-prompt', '--json-schema', '--resume', '--continue']) assert.ok(!args.includes(flag), flag);
+});
 test('nonzero exits, protocol errors, malformed output and missing results throw safely', async t => {
   const f = await fixture(t);
   for (const prompt of ['error', 'protocol-error', 'malformed', 'missing']) {

@@ -13,6 +13,9 @@ export interface PluginConfig {
   workspaceRoot: string
   permissionMode: 'dontAsk' | 'plan' | 'acceptEdits'
   tools: string
+  /** Fixed: provider calls always run through ACP autonomous execution. */
+  executionMode: 'autonomous'
+  dangerouslySkipPermissions: boolean
   timeoutMs: number
   reasoningEffort: string
   maxConcurrency: number
@@ -81,6 +84,8 @@ export function resolveConfig(entry: Record<string, unknown> = {}, env = process
     defaultModel: model, models: cleanModels, hiddenModels: [...new Set(hiddenModels)],
     workspaceRoot: string('workspaceRoot', 'DSH_CODEBUDDY_WORKSPACE_ROOT'),
     permissionMode: mode, tools: string('tools', 'DSH_CODEBUDDY_TOOLS'),
+    executionMode: 'autonomous',
+    dangerouslySkipPermissions: bool('dangerouslySkipPermissions', 'DSH_CODEBUDDY_DANGEROUSLY_SKIP_PERMISSIONS', false),
     timeoutMs: number('timeoutMs', 'DSH_CODEBUDDY_TIMEOUT_MS', 600000),
     reasoningEffort,
     maxConcurrency: boundedInteger('maxConcurrency', 'DSH_CODEBUDDY_MAX_CONCURRENCY', 2, 1, 16),

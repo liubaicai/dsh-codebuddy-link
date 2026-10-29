@@ -1,19 +1,19 @@
 # dsh-codebuddy-link
 
-将腾讯 CodeBuddy CLI 接入 DeepSeek Harness (DSH) 的 Cordis 插件。参考 [amlyczz/dsh-agy-link](https://github.com/amlyczz/dsh-agy-link) 的 CLI provider 桥接思路，针对 CodeBuddy 的 `stream-json` 协议重新实现。
+将腾讯 CodeBuddy CLI 接入 DeepSeek Harness (DSH) 的 Cordis 插件。参考 [amlyczz/dsh-agy-link](https://github.com/amlyczz/dsh-agy-link) 的 CLI provider 桥接思路，Provider 通过 ACP stdio 原生自主执行，独立委派与后台请求保留 `stream-json` 兼容调用。
 
 ## 功能
 
 - **模型提供方**：在 DSH 中选择 `codebuddy/default`，优先使用插件保存的授权，否则回退到本机 CodeBuddy CLI 登录态。
-- **DSH 工具调用**：模型通过结构化响应申请 DSH 工具，由 DSH 执行；不会把 DSH 的文件权限边界替换为 CodeBuddy 内置工具。
-- **独立委派**：`codebuddy_ask` 接收一个独立问题，不自动发送 DSH 历史。
+- **ACP 原生执行（固定）**：Provider 主调用始终通过 ACP stdio 使用 CodeBuddy CLI 原生完整工具完成读写和命令，DSH 接收进度及最终结果；不再提供 bridge/DSH 工具协议解析模式（旧配置中的 `executionMode` 自动迁移，不可降级回旧模式）。
+- **独立委派**：`codebuddy_ask` 接收一个独立问题，不自动发送 DSH 历史，默认关闭原生工具。
 - `/codebuddy status`、`/codebuddy models`、`/codebuddy runs`、`/codebuddy help`。
 - 主模型与独立委派共享思考强度默认值、进程内 FIFO 并发队列；设置页提供脱敏调用诊断和无进展提醒。
 - 文本与思考流、usage、取消、超时、Windows npm 启动器及进程树回收。
 
 ## 安装
 
-要求 Node.js **22.18+**，以及支持当前 LlmAdapter API 的 DSH（开发时使用 `@deepseek-ai/dsh-* 0.1.2-rc.1`）。CodeBuddy CLI 需支持 `--print`、`--output-format stream-json`、`--include-partial-messages`、`--tools` 和 `--no-session-persistence`；本项目在 **2.177.1** 上核验参数和认证失败协议。
+要求 Node.js **22.18+**，以及支持当前 LlmAdapter API 的 DSH（开发时使用 `@deepseek-ai/dsh-* 0.1.2-rc.1`）。CodeBuddy CLI 需支持 `--acp --acp-transport stdio`（ACP v1，provider 必需）以及独立委派使用的 `--print`、`--output-format stream-json`、`--include-partial-messages`、`--tools` 和 `--no-session-persistence`；本项目在 **2.177.1** 上核验参数和认证失败协议。
 
 ### 1. 安装 CodeBuddy CLI
 
@@ -28,7 +28,7 @@ npm install -g @tencent-ai/codebuddy-code
 需要本机安装 Git。公开仓库使用 HTTPS，不要求 SSH 密钥。将 `web` 替换成实际使用的 DSH profile：
 
 ```sh
-dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.18"
+dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.20"
 ```
 
 仓库**包含已构建的 dist**，安装不依赖 TypeScript、开发依赖或安装时构建脚本。CI 会重新构建并检查提交的产物，避免源码与产物不一致。
@@ -44,10 +44,10 @@ dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-lin
 从 [Releases](https://github.com/liubaicai/dsh-codebuddy-link/releases) 下载对应版本 `.tgz`，可使用同页 `SHA256SUMS.txt` 核对 SHA-256。进入下载目录后执行：
 
 ```powershell
-dsh plugin --profile web add .\dsh-codebuddy-link-0.3.18.tgz
+dsh plugin --profile web add .\dsh-codebuddy-link-0.3.20.tgz
 ```
 
-macOS/Linux 使用 `./dsh-codebuddy-link-0.3.18.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
+macOS/Linux 使用 `./dsh-codebuddy-link-0.3.20.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
 
 ### 4. 启用与升级
 
@@ -62,7 +62,8 @@ GitHub 安装或 Actions 不会读取你的 CodeBuddy 凭据；模型请求只�
 - 进入面板自动刷新账户；账户状态为“可用”后自动获取模型列表。也可手动点击“刷新账户”或“获取模型列表”，勾选要启用的模型并选择默认模型；手动输入保留在高级设置中。列表合并中国区、国际区配置和已安装官方 CLI 候选；来源不完整时会明确提示，候选不代表账户调用权限。
 - 保存会立即刷新 DSH 模型目录，在会话模型选择器中选择 `codebuddy/<模型ID>`。取消启用的模型即使仍被旧会话选中，也不会继续调用。
 - 默认模型用于未显式指定模型的调用（如 `codebuddy_ask`）；不会覆盖会话中明确选择的模型。`default` 特指 CLI 自己的默认模型。
-- 可选择 `dontAsk` / `plan` / `acceptEdits`，**仅对独立委派的 CLI 内置工具生效**；provider 模式仍由 DSH 管理工具执行权限。
+- Provider 固定通过 ACP stdio 原生执行：设置页不再提供执行模式开关。可单独勾选 `--dangerously-skip-permissions`；无论是否勾选，ACP 原生工具都会绕过 DSH 沙箱和逐项确认，仅用于可信任务。
+- `dontAsk` / `plan` / `acceptEdits` 对独立委派及未启用权限跳过的 ACP CLI 生效。
 - 设置持久化在 `${DSH_HOME}/plugins/dsh-codebuddy-link/settings.json`（默认 `~/.dsh/...`）。面板只保存非敏感的模型和委派设置，不保存凭据。
 
 ### 共享积分（实验性，只读）
@@ -102,7 +103,8 @@ Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 
 | `defaultModel` | `DSH_CODEBUDDY_DEFAULT_MODEL` | `default`；不传 `--model`，由 CLI 决定 |
 | `models` | `DSH_CODEBUDDY_MODELS` | 数组 / 逗号分隔模型 ID；始终包含 `default` |
 | `hiddenModels` | `DSH_CODEBUDDY_HIDDEN_MODELS` | 隐藏并禁止调用的模型 ID 数组 / 逗号分隔列表 |
-| `workspaceRoot` | `DSH_CODEBUDDY_WORKSPACE_ROOT` | 当前 DSH session 工作目录；不可用时 provider 使用进程工作目录 |
+| `workspaceRoot` | `DSH_CODEBUDDY_WORKSPACE_ROOT` | 当前 DSH session 工作目录；ACP 原生执行必需，缺失时拒绝启动 |
+| `dangerouslySkipPermissions` | `DSH_CODEBUDDY_DANGEROUSLY_SKIP_PERMISSIONS` | `false`；仅 provider ACP 主调用生效，传入 `--dangerously-skip-permissions`，不影响 `codebuddy_ask` |
 | `timeoutMs` | `DSH_CODEBUDDY_TIMEOUT_MS` | `600000`；获得并发槽位后启动 CLI 的执行预算，不含排队时间 |
 | `reasoningEffort` | `DSH_CODEBUDDY_REASONING_EFFORT` | `auto`；主模型与独立委派共享默认值，允许 `auto/minimal/low/medium/high/xhigh/max/ultracode` |
 | `maxConcurrency` | `DSH_CODEBUDDY_MAX_CONCURRENCY` | `2`；整数 1–16，当前插件实例内共享并发槽位 |
@@ -113,7 +115,7 @@ Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 
 | `maxPromptChars` | `DSH_CODEBUDDY_MAX_PROMPT_CHARS` | `1000000`；超限报错，不静默截断 |
 | `askTool` | `DSH_CODEBUDDY_ASK_TOOL` | `true`，注册独立委派工具 |
 | `tools` | `DSH_CODEBUDDY_TOOLS` | 空字符串，禁用 CLI 内置工具；**仅影响 `codebuddy_ask`** |
-| `permissionMode` | `DSH_CODEBUDDY_MODE` | `dontAsk`；可选 `plan` / `acceptEdits`；**仅影响 `codebuddy_ask`** |
+| `permissionMode` | `DSH_CODEBUDDY_MODE` | `dontAsk`；可选 `plan` / `acceptEdits`；影响 `codebuddy_ask` 和未启用权限跳过的 ACP provider |
 
 示例（放入对应 Cordis 插件条目）：
 
@@ -128,6 +130,8 @@ Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 
 ```
 
 `models` 是已启用列表；设置页可发现候选并保存选择。发现结果不会自动启用，也不会改变 CLI 登录区域或授予跨区调用权限。不要将其他服务的模型名直接当作 CodeBuddy ID。
+
+旧版本插件曾提供 `executionMode`（`bridge`/`autonomous`）开关与 `DSH_CODEBUDDY_EXECUTION_MODE` 环境变量。该配置已退役：保存的旧值在加载时被丢弃并自动迁移到 ACP，设置接口收到的同名键会被忽略且不再持久化，任何旧值都不能把 provider 降级回 DSH 工具协议。
 
 ## 思考强度、调用诊断与排队（0.3.18）
 
@@ -145,11 +149,23 @@ Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 
 
 每次调用启动一个新的 CLI 进程，通过 stdin 发送完整、有序的 DSH 对话；不使用 `--resume`，不持久化 CLI session。DSH 历史包含先前工具调用和结果，思考块不回传。这样重试、分叉和压缩后的对话不会与另一套 CLI 会话历史错位。
 
-**Provider 模式始终使用 `--tools "" --permission-mode dontAsk`。** 有 DSH 工具时通过系统级传输约定要求 CLI 返回逐条独立的 NDJSON 对象（文本记录与工具记录，不再要求外层 `toolCalls` 数组）（0.3.10 起不再使用 `--json-schema`：实测该模式使计费输入膨胀 4-8 倍、耗时约 3 倍且偶尔拒绝调用其内部 StructuredOutput 工具），桥接层统一解析完整回复（支持 JSON 围栏与常见协议格式，不从说明文字中提取可执行片段），校验工具名称和参数 JSON，再转换为原生 DSH tool-call，由 DSH 负责权限与执行。此模式等待完整结果后输出，不能保证逐 token 显示。没有工具的调用支持文本流。
+### ACP 原生执行（provider 固定模式）
 
-工具参数要求模型返回 JSON 对象，历史工具调用中的合法对象参数也会解码后投影，避免前后示例不一致与双重转义；不改变存储的历史，仍兼容已有的合法字符串参数。传输约定追加在原系统提示后，仅规定编码，不替代原有任务、安全与权限规则。逐条记录减少外层嵌套，但不保证模型永远生成合法 JSON。解析失败时，完整原始回复同时进入文本诊断与终止错误详情（部分 DSH 版本会把失败文本流收进不可见的 attempt，不能仅依赖文本流），并保留失败状态；整批工具调用均不执行，不自动删除多余括号、不截取部分工具、不自动重试。参数字符串错误会标明第几个工具调用。CLI 的最终正文优先于流式片段；若 `structured_output` 是解析输入，也展示该值的 JSON 表示（不是原始传输字节）。插件不截断这段诊断正文；DSH 的渲染、历史保留和压缩仍由宿主管理。**原文会进入会话记录，可能包含代码或敏感内容，复制分享前请检查。** 不显示提示词、认证配置、stderr 或原始传输事件；设置页的运行记录仍只含元数据。
+Provider 主调用不需要任何开关，始终通过 ACP stdio 原生执行。如需进一步跳过 CLI 权限检查，在设置页勾选危险开关并保存，或配置：
 
-`codebuddy_ask` 默认同样关闭 CLI 工具。如果管理员显式启用 `tools`，CLI 工具会在独立进程中执行，**不受 DSH 文件沙箱约束，也没有逐项 DSH 工具卡片或确认界面**。不要在不可信任务中启用；不要使用该设置绕过 DSH 的权限限制。启用工具时必须能解析到 session 工作目录，或显式配置 `workspaceRoot`。本插件不提供 `bypassPermissions`。
+```yaml
+dangerouslySkipPermissions: true
+```
+
+ACP provider 通过 **ACP stdio**（`--acp --acp-transport stdio --tools default`）接入，使用 JSON-RPC `initialize → session/new → session/prompt`，从 `session/update` 获取原生执行事件；不使用 print 文本流作为 provider 传输，也不会失败后自动回退并重复执行任务。保留 CLI 原生系统提示并追加任务上下文，不发送 DSH 工具 schemas 或要求模型手写调用协议。CLI 自行解析、执行原生工具；插件接收进度、最终文本和错误，绝不把 CLI 已执行的操作重新发给 DSH。ACP 的上下文窗口 `usage_update.used/size` 不能当作计费 token；仅识别 CodeBuddy 扩展中明确的逐消息 token 计数和累计请求积分，按消息/请求 ID 去重。没有完整可靠字段时保持未知，不伪造为 0。过程显示在思考/进度区，完整最终结果单独显示；即使最终文本像 JSON/DSML 也不再解析为 DSH 调用。标题/压缩等带 `purpose` 的后台请求始终关闭原生工具及权限跳过。每轮仍使用新 CLI 进程、新 ACP session 和 DSH 历史，不复用 ACP session/load，避免分叉、重试、压缩时两套历史失配。进程 cwd 与 session/new.cwd 同时绑定会话工作目录。取消时先记录 Windows 子进程身份，再发 session/cancel，以有界等待回收进程树并核对已记录的子进程；无法确认清理成功时报错。CLI 内部逐项工具结果不回传为下一轮历史，重要结论应写入最终回答。
+
+启用权限跳过时只传 `--dangerously-skip-permissions`，不同时传冲突的 `--permission-mode dontAsk`。**CodeBuddy 2.177.1 的帮助明确提示 HIGH/CRITICAL 操作仍可能要求确认**；插件不会另外注入 `CODEBUDDY_IS_SANDBOX=1` 来扩大该授权。ACP 若仍发出 `session/request_permission`，客户端返回取消并报错，不自动批准残余高风险请求。客户端不声明文件/终端代理能力，读写与命令由 CLI 原生执行；未知客户端方法返回 method-not-found。非交互调用如被 CLI 安全策略拦截，会报错而不是伪造成功。工作目录不是隔离边界；此模式允许 CLI 以当前系统用户权限访问文件和运行命令，不经过 DSH 文件沙箱或逐项工具确认。取消/超时可以终止进程，但无法撤销已完成的写入或外部操作。仅用于可信任务。
+
+### 独立委派与后台请求（受限 print 模式）
+
+会话标题与压缩等带 `purpose` 的后台请求始终走 `--print --tools "" --permission-mode dontAsk`，不启用 CLI 原生工具。`codebuddy_ask` 同样走 print，默认关闭工具，但遵循管理员单独配置的 `tools` 与权限模式。两者均不注入 DSH 工具调用协议，也不解析结构化工具调用。
+
+旧版 provider 的 **DSH 工具桥接模式**（NDJSON 工具协议、统一回复归一化器及解析失败诊断）已随固定 ACP 模式移除，不再作为 provider 失败面存在。`codebuddy_ask` 默认同样关闭 CLI 工具。如果管理员显式启用 `tools`，CLI 工具会在独立进程中执行，**不受 DSH 文件沙箱约束，也没有逐项 DSH 工具卡片或确认界面**。不要在不可信任务中启用；不要使用该设置绕过 DSH 的权限限制。启用工具时必须能解析到 session 工作目录，或显式配置 `workspaceRoot`。provider 的权限跳过开关不会隐式赋予 `codebuddy_ask` 权限。
 
 CLI 会自行加载其用户配置、工作目录规则等；插件并非隔离运行 CodeBuddy 的沙箱。发送给 CLI 的对话和工具描述将按 CodeBuddy 服务及账户策略处理。
 
@@ -157,27 +173,10 @@ CLI 会自行加载其用户配置、工作目录规则等；插件并非隔离�
 
 ## 验证范围与限制
 
-- 自动化测试覆盖配置、完整历史投影、结构化工具映射、流结束与错误、NDJSON/Unicode、usage 去重、argv、超时/取消和子进程树回收。
-- 使用 CodeBuddy 2.177.1 验证过启动参数，并通过已脱敏或合成的 401、DSML、分段 JSON、普通最终回答样本进行回归。历史成功/失败样本与自动化模拟测试不代表所有账户、模型和 CLI 版本均已在线验收；请按下方步骤完成自己环境中的工具闭环验证。
+- 自动化测试覆盖配置、完整历史投影、流结束与错误、NDJSON/Unicode、usage 去重、argv、超时/取消和子进程树回收。
+- 使用 CodeBuddy 2.177.1 验证过启动参数；ACP provider 在临时目录使用 `deepseek-v4.1-flash` 经适配器实测通过原生 `Write / Read / Bash`，核对磁盘随机校验值、命令输出、最终结果及真实用量。另以无推理握手核对 `--model minimax-m3.1-flash --effort high` 的会话配置，并实测在原生 Bash 启动时取消返回 AbortError；Windows 回收覆盖父进程先退出后存活的子/孙进程清理。历史成功/失败样本与自动化模拟测试不代表所有账户、模型和 CLI 版本均已在线验收；请按下方步骤完成自己环境中的工具闭环验证。
 - 目前仅支持文本，不支持图片、附件自动上传或原生 CodeBuddy 工具回放。
-- 工具模式使用统一回复归一化器（0.3.14），兼容范围见下表；规范输出仍是 `{"text":"...","toolCalls":[]}`。全部分段校验通过后才输出，所有调用仍由 DSH 权限与执行流程处理。
-
-### 回复格式兼容矩阵（0.3.14）
-
-| 格式 | 支持范围 |
-| --- | --- |
-| DSH | 完整或 text-only / toolCalls-only 信封，按序排列的信封/调用/内容块数组 |
-| OpenAI | assistant content + tool_calls、旧 function_call、单一 choices/message 包装；Responses function_call、message/output_text、output 包装和常见元数据 |
-| Anthropic | text / tool_use 内容块、message 包装；thinking / redacted_thinking 仅识别并隐藏，不冒充最终回答 |
-| Gemini | parts / content / 单一 candidates；functionCall、args、thoughtSignature；thought=true 不作为最终文字 |
-| 参数 | arguments / args / input / parameters 中恰好一个；JSON 对象或 JSON 编码的对象字符串，字符串字节原样保留 |
-| 传输包装 | 完整 JSON、空白分隔多文档、整体或逐段 JSON 围栏、BOM/CRLF、额外一层 JSON 字符串编码 |
-| 原生标签 | 完整独立 DeepSeek DSML；完整独立 `<tool_call>` JSON 标签（Hermes/Qwen 风格） |
-| 普通回答 | 自然语言直接保留；说明文字、源码围栏中的示例不会提取为可执行调用 |
-
-安全边界：最多 32 个调用、64 个传输文档、32 层嵌套及 256 个响应结构节点；未知工具、缺少参数、冲突字段/调用通道、重复 JSON 键、重复调用 ID、多候选结果、截断或错误完成状态均拒绝。不修复坏 JSON、不猜测工具名、不补默认参数，不解析任意 XML/JSON5；jsonc 围栏也只接受严格 JSON。参数内部允许数组，但根参数必须是对象。明确的 refusal 与调用不能共存。
-
-单独的 JSON 协议围栏按协议回复处理；讲解/示例必须放在 text 字段或自然语言说明中。以 JSON 开头却混入尾随说明的输出仍会失败，避免误执行有效前缀。仅收录明确格式，不承诺未来未知序列化或新供应商字段自动兼容；格式测试不等于每个上游服务的在线验证。
+- 旧版 bridge 工具协议的统一回复归一化器（0.3.14）已不再处于 provider 运行路径；其兼容矩阵与安全边界说明见对应历史版本文档。
 
 - CLI 计费/额度以 CodeBuddy 为准；插件转发 token usage，诊断仅显示 CLI 明确返回的积分/费用，不估算费用。
 - `/codebuddy status` 只显示配置，不证明登录成功。
@@ -204,11 +203,11 @@ npm pack
 
 1. `codebuddy` 普通终端问答成功。
 2. 在 DSH 选择 `codebuddy/default`，发送简单问题，确认收到回复。
-3. 要求读取工作目录中的一个测试文件，确认显示 **DSH 原生读取工具卡片**，随后能总结内容。
+3. 要求读取工作目录中的一个测试文件，确认思考/进度区出现 CodeBuddy 原生工具执行记录（如 `[CodeBuddy 执行: Read]`），随后能总结内容。
 4. 取消一轮长任务，确认不再输出且无遗留 CLI 子进程。
 5. 切换回其他模型，调用 `codebuddy_ask` 验证独立委派。
 6. 设置 → CodeBuddy 中添加账户实际支持的模型 ID，保存并确认会话模型选择器更新；取消启用后旧会话也应拒绝调用该模型。
-7. 修改委派权限模式，确认仅独立委派受影响，provider 的文件工具仍走 DSH 权限控制。
+7. 修改权限模式，确认影响独立委派和未跳过权限检查的 ACP provider；勾选/取消权限跳过开关后发起新调用验证生效，后台请求仍禁用工具。
 8. 配置积分凭据文件，点击刷新并与同一账户的官方用量页核对；再使用过期凭据，确认显示认证错误而非 0 积分。
 
 ## 开发

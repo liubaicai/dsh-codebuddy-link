@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { Message, StreamChunk } from '@deepseek-ai/dsh-llm'
-import { buildPrompt, buildSystemPrompt, parseResponse, RESPONSE_CONTRACT } from '../src/prompt.ts'
+import { autonomousSystemPrompt, buildPrompt, buildSystemPrompt, parseResponse, RESPONSE_CONTRACT } from '../src/prompt.ts'
 import { CodeBuddyAdapter } from '../src/adapter.ts'
 import { resolveConfig } from '../src/config.ts'
 const tools=[{name:'read',description:'read',parameters:{}},{name:'workflow',description:'workflow',parameters:{}}]
@@ -26,20 +26,40 @@ test('malformed historical arguments are retained as opaque data rather than rep
   }
 })
 
-test('transport appendix preserves original system policy and leaves auxiliary calls unchanged',async()=>{
+test('standalone transport appendix preserves original system policy',()=>{
   const system='SYSTEM policy: preserve me verbatim. Native tool channels normally apply.'
   assert.equal(buildSystemPrompt(system,false),system)
   assert.equal(buildSystemPrompt(undefined,false),undefined)
   assert.equal(buildSystemPrompt(system,true),system+'\n\n'+RESPONSE_CONTRACT)
+})
+
+test('ordinary calls append autonomous context while auxiliary calls stay restricted and unstructured',async()=>{
+  const system='SYSTEM policy: preserve me verbatim. Native tool channels normally apply.'
   for(const purpose of [undefined,'session-title'] as const) {
-    const adapter=new CodeBuddyAdapter(resolveConfig({},{}),async function*(request){
-      assert.equal(request.systemPrompt,purpose?system:buildSystemPrompt(system,true))
-      assert.equal(request.tools,''); assert.equal(request.jsonSchema,undefined)
-      yield {type:'result',text:purpose?'title':'{"type":"text","text":"done"}'}
+    const expected=purpose?'title':'{"type":"text","text":"done"}'
+    const cfg=resolveConfig({workspaceRoot:process.cwd(),permissionMode:'acceptEdits',dangerouslySkipPermissions:true},{})
+    let invoked=false
+    const adapter=new CodeBuddyAdapter(cfg,async function*(request){
+      invoked=true
+      assert.equal(request.cwd,process.cwd())
+      assert.equal(request.systemPrompt,purpose?system:undefined)
+      assert.equal(request.appendSystemPrompt,purpose?undefined:autonomousSystemPrompt(system))
+      assert.equal(request.permissionMode,purpose?'dontAsk':'acceptEdits')
+      assert.equal(request.dangerouslySkipPermissions,purpose?undefined:true)
+      assert.equal(request.tools,purpose?'':'default')
+      assert.equal(request.jsonSchema,undefined)
+      assert.doesNotMatch(request.prompt,/DSH transport contract|Available DSH tools:/)
+      assert.equal(request.prompt,buildPrompt([],[],cfg.maxPromptChars,!purpose))
+      yield {type:'result',text:expected}
     })
-    for await(const chunk of adapter.stream({provider:'codebuddy',model:'default',system,purpose,messages:[],tools})) {
-      if(chunk.type==='finish')assert.equal(chunk.reason.kind,'stop')
-    }
+    const chunks:StreamChunk[]=[]
+    for await(const chunk of adapter.stream({provider:'codebuddy',model:'default',system,purpose,messages:[],tools})) chunks.push(chunk)
+    assert.equal(invoked,true)
+    assert.deepEqual(chunks.filter(c=>c.type==='text-delta').map(c=>c.text),[expected])
+    assert.equal(chunks.filter(c=>c.type==='tool-call-delta'||c.type==='block-start'&&c.blockType==='tool-call').length,0)
+    assert.equal(chunks.filter(c=>c.type==='finish').length,1)
+    const finish=chunks.at(-1)
+    assert.equal(finish?.type==='finish'&&finish.reason.kind,'stop')
   }
 })
 
@@ -52,20 +72,21 @@ test('independent records preserve long nested script and arguments without oute
   assert.deepEqual(JSON.parse(parsed.toolCalls[1]!.arguments),args)
 })
 
-test('missing middle brace and extra workflow closing brace remain atomic failures visible through error channel',async()=>{
+test('malformed envelopes still fail the standalone parser but remain ordinary ACP final text',async()=>{
   const samples=[
     '{"text":"review","toolCalls":[{"name":"read","arguments":{"file_path":"a"}},{"name":"read","arguments":{"file_path":"b"},{"name":"read","arguments":{"file_path":"c"}}]}',
     '{"text":"review","toolCalls":[{"name":"read","arguments":{"file_path":"a"}},{"name":"workflow","arguments":{"meta":{"name":"audit"},"script":"return 1;"},"args":{"cwd":"/project"},"run_in_background":false}}]}',
     '{"type":"tool-call","name":"read","arguments":{"file_path":"a"}}\n{"type":"tool-call","name":"read","arguments":{"file_path":"b"}',
   ]
   for(const raw of samples){
+    assert.throws(()=>parseResponse(raw,tools))
     const chunks:StreamChunk[]=[]
-    const adapter=new CodeBuddyAdapter(resolveConfig({},{}),async function*(){yield {type:'result',text:raw}})
+    const adapter=new CodeBuddyAdapter(resolveConfig({workspaceRoot:process.cwd()},{}),async function*(){yield {type:'result',text:raw}})
     for await(const chunk of adapter.stream({provider:'codebuddy',model:'default',messages:[],tools}))chunks.push(chunk)
-    assert.equal(chunks.filter(c=>c.type==='tool-call-delta').length,0)
+    assert.equal(chunks.filter(c=>c.type==='tool-call-delta'||c.type==='block-start'&&c.blockType==='tool-call').length,0)
+    assert.equal(chunks.filter(c=>c.type==='finish').length,1)
     const finish=chunks.at(-1)
-    assert.ok(finish?.type==='finish'&&finish.reason.kind==='error')
-    assert.ok(finish.reason.failure?.message.includes(raw))
-    assert.ok(chunks.filter(c=>c.type==='text-delta').map(c=>c.text).join('').includes(raw))
+    assert.ok(finish?.type==='finish'&&finish.reason.kind==='stop')
+    assert.deepEqual(chunks.filter(c=>c.type==='text-delta').map(c=>c.text),[raw])
   }
 })

@@ -62,7 +62,8 @@ test('aggregate call limit applies across documents, with exact boundary accepte
 
 async function replay(text: string, resultOnly = false): Promise<StreamChunk[]> {
   const runner: Runner = async function* (request) {
-    assert.equal(request.tools, '')
+    assert.equal(request.tools, 'default')
+    assert.equal(request.cwd, process.cwd())
     assert.equal(request.permissionMode, 'dontAsk')
     assert.equal(request.jsonSchema, undefined)
     if (!resultOnly) for (let i = 0; i < text.length; i += 17) yield {type:'text',delta:text.slice(i, i+17)}
@@ -70,33 +71,33 @@ async function replay(text: string, resultOnly = false): Promise<StreamChunk[]> 
     if (resultOnly) yield {type:'result',text,sessionId:'split-fixture'}
   }
   const out: StreamChunk[] = []
-  for await (const chunk of new CodeBuddyAdapter(resolveConfig({},{}), runner).stream({provider:'codebuddy',model:'default',messages:[],tools})) out.push(chunk)
+  for await (const chunk of new CodeBuddyAdapter(resolveConfig({workspaceRoot:process.cwd()},{}), runner).stream({provider:'codebuddy',model:'default',messages:[],tools})) out.push(chunk)
   return out
 }
 
-test('adapter replays split fixture through fragmented stream and final result paths', async () => {
-  const expected = parseResponse(raw, tools)
+test('fixed ACP preserves split fixture through fragmented stream and final result paths without replay', async () => {
   for (const resultOnly of [false,true]) {
     const out = await replay(raw, resultOnly)
-    assert.deepEqual(out.filter(c => c.type === 'text-delta').map(c => c.text), [expected.text])
-    assert.deepEqual(out.filter(c => c.type === 'tool-call-delta').map(c => ({name:c.name,arguments:c.argumentsDelta})), expected.toolCalls)
+    assert.deepEqual(out.filter(c => c.type === 'text-delta').map(c => c.text), [raw])
+    assert.equal(out.filter(c => c.type === 'reasoning-delta').map(c => c.text).join(''), resultOnly ? '' : raw)
+    assert.equal(out.filter(c => c.type === 'tool-call-delta' || c.type === 'block-start' && c.blockType === 'tool-call' || c.type === 'block-end' && c.block.type === 'tool-call').length, 0)
     assert.equal(out.filter(c => c.type === 'finish').length, 1)
     const finish = out.at(-1)
-    assert.equal(finish?.type === 'finish' && finish.reason.kind, 'tool-calls')
-    assert.ok(out.some(c => c.type === 'usage' && c.usage.outputTokens === 1125))
+    assert.equal(finish?.type === 'finish' && finish.reason.kind, 'stop')
+    assert.deepEqual(finish?.type === 'finish' && finish.replayState, {response:{sessionId:resultOnly?'split-fixture':null}})
+    assert.deepEqual(out.filter(c => c.type === 'usage').map(c => c.usage), [{inputTokens:83814,outputTokens:1125,cacheReadTokens:77568,cacheWriteTokens:0}])
   }
 })
 
-test('adapter validates entire response before calls and shows failures only as diagnostic text', async () => {
-  for (const text of bad) {
-    const out = await replay(text)
+test('fixed ACP leaves broken suffix documents opaque in both result and stream fallback', async () => {
+  for (const text of bad) for (const resultOnly of [false,true]) {
+    const out = await replay(text, resultOnly)
     assert.equal(out.filter(c => c.type === 'tool-call-delta' || c.type === 'block-start' && c.blockType === 'tool-call').length, 0)
-    const diagnostic = out.filter(c => c.type === 'text-delta').map(c => c.text).join('')
-    assert.match(diagnostic, /响应解析失败/)
-    assert.ok(diagnostic.includes(text))
+    assert.deepEqual(out.filter(c => c.type === 'text-delta').map(c => c.text), [text])
+    assert.equal(out.filter(c => c.type === 'reasoning-delta').map(c => c.text).join(''), resultOnly ? '' : text)
     assert.equal(out.filter(c => c.type === 'finish').length, 1)
     assert.equal(out.filter(c => c.type === 'usage').length, 1)
     const finish = out.at(-1)
-    assert.equal(finish?.type === 'finish' && finish.reason.kind, 'error')
+    assert.equal(finish?.type === 'finish' && finish.reason.kind, 'stop')
   }
 })

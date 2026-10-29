@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:http'
@@ -30,7 +30,8 @@ test('runtime settings persist atomically and invalid updates leave live and sav
   try {
     const store = new SettingsStore({}, join(dir, 'settings.json'))
     const live = store.config
-    const patch = {reasoningEffort:'xhigh', maxConcurrency:4, queueTimeoutMs:12000, stallWarnMs:0}
+    assert.equal(store.config.executionMode, 'autonomous'); assert.equal(store.config.dangerouslySkipPermissions, false)
+    const patch = {reasoningEffort:'xhigh', maxConcurrency:4, queueTimeoutMs:12000, stallWarnMs:0, dangerouslySkipPermissions:true}
     store.update(patch)
     assert.equal(store.config, live)
     const saved = readFileSync(store.path, 'utf8')
@@ -39,8 +40,23 @@ test('runtime settings persist atomically and invalid updates leave live and sav
     for (const [key, value] of Object.entries(patch)) assert.equal(restored.config[key as keyof typeof patch], value)
     assert.throws(() => store.update({maxConcurrency:17}), /maxConcurrency/)
     assert.throws(() => store.update({reasoningEffort:'invalid'}), /reasoningEffort/)
+    assert.throws(() => store.update({dangerouslySkipPermissions:1}), /dangerouslySkipPermissions/)
+    assert.equal(store.config.executionMode, 'autonomous'); assert.equal(store.config.dangerouslySkipPermissions, true)
     assert.equal(store.config.maxConcurrency, 4)
     assert.equal(readFileSync(store.path, 'utf8'), saved)
+    // Settings written by older plugin versions keep loading and are migrated:
+    // the retired executionMode key is dropped on load and never re-persisted.
+    writeFileSync(store.path, JSON.stringify({...JSON.parse(saved), executionMode:'bridge'}))
+    const migrated = new SettingsStore({}, store.path)
+    assert.equal(migrated.config.executionMode, 'autonomous')
+    migrated.update({maxConcurrency:5})
+    assert.ok(!Object.hasOwn(JSON.parse(readFileSync(store.path, 'utf8')), 'executionMode'))
+    // A stale pre-upgrade settings page may still send the retired key; the
+    // patch is tolerated (key ignored), not rejected, and never persisted.
+    migrated.update({executionMode:'autonomous', maxConcurrency:6})
+    assert.equal(migrated.config.executionMode, 'autonomous'); assert.equal(migrated.config.maxConcurrency, 6)
+    assert.ok(!Object.hasOwn(JSON.parse(readFileSync(store.path, 'utf8')), 'executionMode'))
+    assert.throws(() => migrated.update({unknownSetting:1}), /Unsupported setting/)
   } finally { rmSync(dir, {recursive:true, force:true}) }
 })
 
@@ -157,6 +173,7 @@ test('HTTP settings enforce method, same origin, JSON and publish refresh status
   const address = server.address() as {port:number}; const base = `http://127.0.0.1:${address.port}/plugins/codebuddy-link`
   try {
     const initial = await (await fetch(base+'/status')).json() as {config:Record<string,unknown>; runs:Record<string,unknown>[]}
+    assert.equal(initial.config.executionMode,undefined); assert.equal(initial.config.dangerouslySkipPermissions,false)
     assert.equal(initial.config.reasoningEffort,'auto'); assert.equal(initial.config.maxConcurrency,2)
     assert.equal(initial.config.queueTimeoutMs,600000); assert.equal(initial.config.stallWarnMs,90000)
     assert.equal(initial.runs.length,5); assert.equal(initial.runs[0]!.totalCredits,0); assert.equal(initial.runs[0]!.totalCostUsd,0)
@@ -165,9 +182,10 @@ test('HTTP settings enforce method, same origin, JSON and publish refresh status
     assert.equal((await fetch(base+'/config')).status,405)
     assert.equal((await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json',origin:'https://evil.example'},body:'{}'})).status,403)
     assert.equal((await fetch(base+'/config',{method:'POST',body:'{}'})).status,415)
-    const saved = await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({models:['hy3'],permissionMode:'plan',reasoningEffort:'high',maxConcurrency:3,queueTimeoutMs:6000,stallWarnMs:0})})
+    const saved = await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({models:['hy3'],permissionMode:'plan',reasoningEffort:'high',maxConcurrency:3,queueTimeoutMs:6000,stallWarnMs:0,executionMode:'bridge',dangerouslySkipPermissions:true})})
     assert.equal(saved.status,200); assert.equal(changed,1)
     const settings = await saved.json() as {config:Record<string,unknown>}
+    assert.equal(settings.config.executionMode,undefined); assert.equal(settings.config.dangerouslySkipPermissions,true)
     assert.equal(settings.config.reasoningEffort,'high'); assert.equal(settings.config.maxConcurrency,3)
     assert.equal(settings.config.queueTimeoutMs,6000); assert.equal(settings.config.stallWarnMs,0)
     assert.equal((await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:'{"queueTimeoutMs":2147483648}'})).status,400)

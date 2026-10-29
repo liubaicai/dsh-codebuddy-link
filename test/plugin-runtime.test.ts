@@ -15,10 +15,25 @@ function deferred() { let resolve!: () => void; const promise = new Promise<void
 const options: GenerateOptions = {provider:'codebuddy', model:'default', messages:[{id:'m1' as Message['id'],source:{kind:'user'},role:'user',content:[{type:'text',text:'ARGV'}]}]}
 async function fixture(t: { after(fn: () => Promise<void>): void }, config: Record<string, unknown> = {}) {
   const home = await mkdtemp(join(tmpdir(), 'cb-integration-')), bin = join(home, 'cli.mjs')
-  await writeFile(bin, `let input = ''; for await (const chunk of process.stdin) input += chunk;
+  await writeFile(bin, `if(process.argv.includes('--acp')) {
+  const {createInterface}=await import('node:readline');
+  const send=x=>console.log(JSON.stringify({jsonrpc:'2.0',...x}));
+  for await(const line of createInterface({input:process.stdin})) {
+    const row=JSON.parse(line);
+    if(row.method==='initialize')send({id:row.id,result:{protocolVersion:1,agentCapabilities:{}}});
+    if(row.method==='session/new')send({id:row.id,result:{sessionId:'fake-session'}});
+    if(row.method==='session/prompt') {
+      const hold=JSON.stringify(row.params.prompt).includes('HOLD');
+      send({method:'session/update',params:{sessionId:'fake-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:hold?'ready':JSON.stringify(process.argv.slice(2))}}}});
+      if(!hold)send({id:row.id,result:{stopReason:'end_turn'}});
+    }
+  }
+} else {
+let input = ''; for await (const chunk of process.stdin) input += chunk;
 const send = x => console.log(JSON.stringify(x));
 if(input.includes('HOLD')) { send({type:'assistant',message:{content:[{type:'text',text:'ready'}]}}); setInterval(()=>{},1000); }
 else { send({type:'result',subtype:'success',result:JSON.stringify(process.argv.slice(2))}); }
+}
 `)
   let adapter!: CodeBuddyAdapter, tool: any, command: any
   const routes = new Map<string, Parameters<WebServerLike['register']>[0]['handler']>()
@@ -43,11 +58,30 @@ else { send({type:'result',subtype:'success',result:JSON.stringify(process.argv.
   const ask = (prompt: string, extra: Record<string, unknown> = {}, signal?: AbortSignal): Promise<string> => tool.execute({prompt,...extra}, {signal})
   const model = async (extra: Partial<GenerateOptions> = {}, onText = () => {}) => {
     let text = ''; let finish: unknown
-    for await (const event of adapter.stream({...options,...extra})) { if (event.type === 'text-delta') {text += event.text; onText()} if (event.type === 'finish') finish = event.reason }
+    for await (const event of adapter.stream({...options,...extra})) { if (event.type === 'text-delta') text += event.text; if (event.type === 'text-delta' || event.type === 'reasoning-delta') onText(); if (event.type === 'finish') finish = event.reason }
     return {text,finish}
   }
   return {tool,update,runs,ask,model}
 }
+
+test('provider always runs ACP; housekeeping and ask stay restricted print', async t => {
+  const f=await fixture(t)
+  await f.update({dangerouslySkipPermissions:true})
+  const native=JSON.parse((await f.model()).text)
+  assert.ok(native.includes('--acp')); assert.ok(!native.includes('--print'))
+  assert.ok(native.includes('--dangerously-skip-permissions'))
+  assert.equal(native[native.indexOf('--tools')+1],'default')
+  for(const args of [JSON.parse((await f.model({purpose:'session-title'})).text),JSON.parse(await f.ask('ARGV'))]) {
+    assert.ok(args.includes('--print')); assert.ok(!args.includes('--acp'))
+    assert.ok(!args.includes('--dangerously-skip-permissions'))
+    assert.equal(args[args.indexOf('--tools')+1],'')
+  }
+  // A stale page flipping the retired switch cannot downgrade the transport.
+  await f.update({executionMode:'bridge'})
+  assert.ok(JSON.parse((await f.model()).text).includes('--acp'))
+  await f.update({dangerouslySkipPermissions:false})
+  assert.ok(!JSON.parse((await f.model()).text).includes('--dangerously-skip-permissions'))
+})
 
 function effort(args: string[]): string | undefined { const at = args.indexOf('--effort'); return at < 0 ? undefined : args[at+1] }
 

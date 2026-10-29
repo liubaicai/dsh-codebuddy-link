@@ -2,12 +2,24 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { CodeBuddyAdapter, CODEBUDDY_EFFORTS, type Runner } from '../src/adapter.ts'
 import { resolveConfig } from '../src/config.ts'
+import { CallRuntime } from '../src/runtime.ts'
+import { runCodeBuddy } from '../src/runner.ts'
+import { runCodeBuddyAcp } from '../src/acp.ts'
+import { join } from 'node:path'
 import { buildPrompt, parseResponse } from '../src/prompt.ts'
 import type { GenerateOptions, Message, ReasoningEffortId, StreamChunk } from '@deepseek-ai/dsh-llm'
 
 const message = (text: string, role = 'user') => ({ id: 'm1', role, source: {kind: role === 'assistant' ? 'model' : 'user'}, content: [{type: 'text', text}] }) as Message
 const options: GenerateOptions = {provider: 'codebuddy', model: 'default', messages: [message('hello')]}
 const collect = async (iter: AsyncIterable<StreamChunk>) => { const out: StreamChunk[] = []; for await (const c of iter) out.push(c); return out }
+const providerConfig = (entry: Record<string, unknown> = {}) => resolveConfig({workspaceRoot: process.cwd(), ...entry}, {})
+const dshTools = [{name:'read', description:'DSH-only tool schema sentinel', parameters:{}}]
+const assertNoReplay = (out: StreamChunk[]) => {
+  assert.ok(!out.some(c => c.type === 'tool-call-delta' || c.type === 'block-start' && c.blockType === 'tool-call' || c.type === 'block-end' && c.block.type === 'tool-call'))
+  const finishes = out.filter(c => c.type === 'finish')
+  assert.equal(finishes.length, 1)
+  assert.equal(finishes[0]?.reason.kind, 'stop')
+}
 
 test('configuration defaults are safe and malformed values fail', () => {
   const cfg = resolveConfig({}, {})
@@ -54,61 +66,159 @@ test('parseResponse accepts whole fences but never executes prose examples', () 
   assert.equal(parseResponse(envelope, tools).toolCalls[0]?.name, 'read')
 })
 
-test('plain stream maps reasoning, text and disjoint usage before finish', async () => {
+test('ordinary calls use native tools and show progress as reasoning before the final answer', async () => {
   const runner: Runner = async function* (request) {
-    assert.equal(request.tools, ''); assert.equal(request.permissionMode, 'dontAsk')
+    assert.equal(request.tools, 'default'); assert.equal(request.permissionMode, 'dontAsk')
     assert.equal(request.model, undefined)
-    yield {type:'reasoning', delta:'think'}; yield {type:'text',delta:'hello'}
+    assert.equal(request.systemPrompt, undefined)
+    assert.match(request.appendSystemPrompt!, /native CodeBuddy tools/)
+    assert.match(request.appendSystemPrompt!, /host instructions/)
+    assert.equal(request.jsonSchema, undefined)
+    assert.ok(!request.prompt.includes(dshTools[0]!.description))
+    yield {type:'reasoning', delta:'think'}; yield {type:'text',delta:'working'}
     yield {type:'usage', input:10,output:5,cacheRead:3,cacheWrite:2}
-    yield {type:'result',text:'hello',sessionId:'s'}
+    yield {type:'result',text:'done',sessionId:'s'}
   }
-  const out = await collect(new CodeBuddyAdapter(resolveConfig({},{}), runner).stream(options))
-  assert.deepEqual(out.filter(c => c.type === 'block-end').map(c => c.block), [{type:'reasoning',text:'think'},{type:'text',text:'hello'}])
-  assert.equal(out.at(-2)?.type,'usage'); assert.equal(out.at(-1)?.type,'finish')
-  assert.ok(!JSON.stringify(out).includes('undefined'))
+  const out = await collect(new CodeBuddyAdapter(providerConfig(), runner).stream({...options, system:'host instructions', tools:dshTools}))
+  assert.deepEqual(out.filter(c => c.type === 'block-end').map(c => c.block), [{type:'reasoning',text:'thinkworking'},{type:'text',text:'done'}])
+  assert.deepEqual(out.at(-2), {type:'usage',usage:{inputTokens:10,outputTokens:5,cacheReadTokens:3,cacheWriteTokens:2}})
+  assert.deepEqual(out.at(-1), {type:'finish',reason:{kind:'stop'},replayState:{response:{sessionId:'s'}}})
+  assertNoReplay(out)
 })
 
-test('tool calls execute through DSH, not CodeBuddy, with raw envelope hidden', async () => {
-  const runner: Runner = async function* (request) {
-    // The CLI's --json-schema mode is intentionally NOT used (cost/latency/reliability):
-    // the envelope arrives as plain result text requested via the prompt.
-    assert.equal(request.jsonSchema, undefined); assert.equal(request.tools,'')
-    yield {type:'text',delta:'{"text":"checking"}'}
-    yield {type:'result',text:'{"text":"checking","toolCalls":[{"name":"read","arguments":"{\\"path\\":\\"a\\"}"}]}'}
+test('ordinary calls never parse or replay DSH envelopes, even with available host tools', async () => {
+  const envelopes = [
+    '{"text":"checking","toolCalls":[{"name":"read","arguments":"{\\"path\\":\\"a\\"}"}]}',
+    '{"type":"tool-call","name":"read","arguments":{"path":"a"}}',
+    '{"toolCalls":',
+  ]
+  for (const text of envelopes) {
+    const runner: Runner = async function* (request) {
+      assert.equal(request.jsonSchema, undefined); assert.equal(request.tools, 'default')
+      yield {type:'text',delta:text}
+      yield {type:'result',text,structuredOutput:{toolCalls:[{name:'read',arguments:'not JSON'}]}}
+    }
+    const out = await collect(new CodeBuddyAdapter(providerConfig(), runner).stream({...options,tools:dshTools}))
+    assert.deepEqual(out.filter(c => c.type === 'text-delta').map(c => c.text), [text])
+    assert.deepEqual(out.filter(c => c.type === 'reasoning-delta').map(c => c.text), [text])
+    assertNoReplay(out)
   }
-  const out = await collect(new CodeBuddyAdapter(resolveConfig({},{}), runner).stream({...options,tools:[{name:'read',description:'read',parameters:{}}]}))
-  assert.deepEqual(out.filter(c => c.type === 'text-delta').map(c => c.text),['checking'])
-  assert.equal(out.filter(c => c.type === 'tool-call-delta').length,1)
-  const last = out.at(-1); assert.equal(last?.type === 'finish' && last.reason.kind,'tool-calls')
+})
+
+test('ordinary calls select ACP while purpose calls retain restricted print transport', async () => {
+  const cfg = providerConfig()
+  const selected: Array<Parameters<CallRuntime['run']>[2]> = []
+  class RecordingRuntime extends CallRuntime {
+    override async *run(...args: Parameters<CallRuntime['run']>) {
+      selected.push(args[2])
+      assert.equal(args[1], 'model')
+      assert.equal(args[3], undefined, 'provider must not register a tool-envelope validator')
+      yield {type:'result' as const,text:'ok'}
+    }
+  }
+  const adapter = new CodeBuddyAdapter(cfg, undefined, undefined, undefined, new RecordingRuntime(cfg))
+  assertNoReplay(await collect(adapter.stream(options)))
+  assertNoReplay(await collect(adapter.stream({...options,purpose:'session-title'})))
+  assert.deepEqual(selected, [runCodeBuddyAcp, runCodeBuddy])
+})
+
+test('native operation events are sanitized progress, never DSH replay', async () => {
+  const runner: Runner = async function* () {
+    yield {type:'tool-start',id:'native-1',name:'read_file',input:{path:'private-input-path'}}
+    yield {type:'tool-end',id:'native-1',name:'read_file',output:'private-output-content',isError:false}
+    yield {type:'tool-start',id:'secret-native-id',name:'<script>private arguments</script>'}
+    yield {type:'tool-end',id:'secret-native-id',name:'<script>private arguments</script>',isError:true}
+    yield {type:'result',text:'done'}
+  }
+  const out = await collect(new CodeBuddyAdapter(providerConfig(), runner).stream({...options,tools:dshTools}))
+  const progress = out.filter(c => c.type === 'reasoning-delta').map(c => c.text).join('')
+  assert.match(progress, /CodeBuddy 执行: read_file/)
+  assert.match(progress, /CodeBuddy 完成: read_file/)
+  assert.match(progress, /CodeBuddy 执行: native-tool/)
+  assert.match(progress, /CodeBuddy 失败: native-tool/)
+  assert.ok(!JSON.stringify(out).includes('private arguments'))
+  assert.ok(!JSON.stringify(out).includes('secret-native-id'))
+  assert.ok(!JSON.stringify(out).includes('private-input-path'))
+  assert.ok(!JSON.stringify(out).includes('private-output-content'))
+  assertNoReplay(out)
+})
+
+test('ordinary final text falls back to accumulated native text when result is empty', async () => {
+  const runner: Runner = async function* () {
+    yield {type:'text',delta:'hello '}; yield {type:'text',delta:'world'}
+    yield {type:'result',text:''}
+  }
+  const out = await collect(new CodeBuddyAdapter(providerConfig(), runner).stream(options))
+  assert.deepEqual(out.filter(c => c.type === 'block-end').map(c => c.block), [{type:'reasoning',text:'hello world'},{type:'text',text:'hello world'}])
+  assertNoReplay(out)
+})
+
+test('ordinary calls require an explicit or session workspace and reject relative paths', async () => {
+  let calls = 0
+  const runner: Runner = async function* () { calls++; yield {type:'result',text:'ok'} }
+  await assert.rejects(collect(new CodeBuddyAdapter(resolveConfig({},{}), runner).stream(options)), /requires a session workspace or explicit workspaceRoot/)
+  await assert.rejects(collect(new CodeBuddyAdapter(providerConfig({workspaceRoot:'relative'}), runner).stream(options)), /absolute path/)
+  assert.equal(calls, 0)
+  const sessionWorkspace = join(process.cwd(), 'session-workspace')
+  const configuredWorkspace = join(process.cwd(), 'configured-workspace')
+  const paths: string[] = []
+  const capture: Runner = async function* (request) { paths.push(request.cwd); yield {type:'result',text:'ok'} }
+  const sessionCwd = (id: string) => id === 'session-1' ? sessionWorkspace : undefined
+  await collect(new CodeBuddyAdapter(resolveConfig({},{}), capture, sessionCwd).stream({...options,sessionId:'session-1' as GenerateOptions['sessionId']}))
+  await collect(new CodeBuddyAdapter(providerConfig({workspaceRoot:configuredWorkspace}), capture, sessionCwd).stream({...options,sessionId:'session-1' as GenerateOptions['sessionId']}))
+  assert.deepEqual(paths, [sessionWorkspace, configuredWorkspace])
 })
 
 test('errors close open content and emit one terminal failure', async () => {
   const runner: Runner = async function* () { yield {type:'text',delta:'partial'}; throw new Error('401 authentication failed') }
-  const out = await collect(new CodeBuddyAdapter(resolveConfig({},{}), runner).stream(options))
+  const out = await collect(new CodeBuddyAdapter(providerConfig(), runner).stream(options))
   assert.equal(out.at(-2)?.type, 'block-end')
   assert.equal(out.filter(c => c.type === 'finish').length, 1)
   const last = out.at(-1); assert.equal(last?.type === 'finish' && last.reason.kind,'error')
 })
 
-test('auxiliary calls cannot execute tools and prepareCall binds model route', async () => {
-  const runner: Runner = async function* (request) { assert.equal(request.jsonSchema,undefined); assert.equal(request.model,'hy3'); yield {type:'result',text:'title'} }
-  const adapter = new CodeBuddyAdapter(resolveConfig({models:['hy3']},{}), runner)
+test('purpose calls stay restricted without a workspace and prepareCall binds the model route', async () => {
+  const runner: Runner = async function* (request) {
+    assert.equal(request.jsonSchema, undefined); assert.equal(request.model, 'hy3')
+    assert.equal(request.tools, ''); assert.equal(request.permissionMode, 'dontAsk')
+    assert.equal(request.dangerouslySkipPermissions, undefined)
+    assert.equal(request.appendSystemPrompt, undefined)
+    assert.equal(request.systemPrompt, 'title instructions')
+    assert.ok(!request.prompt.includes(dshTools[0]!.description))
+    yield {type:'text',delta:'title'}
+    yield {type:'result',text:'title'}
+  }
+  const adapter = new CodeBuddyAdapter(resolveConfig({models:['hy3'],tools:'default',permissionMode:'acceptEdits',dangerouslySkipPermissions:true},{}), runner)
   const call = await adapter.prepareCall('codebuddy','hy3')
-  const out = await collect(call.stream({...options,purpose:'session-title',tools:[{name:'read',description:'',parameters:{}}]}))
-  assert.ok(out.some(c => c.type === 'text-delta' && c.text === 'title'))
+  const out = await collect(call.stream({...options,purpose:'session-title',system:'title instructions',tools:dshTools}))
+  assert.deepEqual(out.filter(c => c.type === 'block-end').map(c => c.block), [{type:'text',text:'title'}])
+  assertNoReplay(out)
+})
+
+test('ordinary native tools ignore legacy tool restrictions while preserving permission settings', async () => {
+  for (const dangerouslySkipPermissions of [false, true]) {
+    const runner: Runner = async function* (request) {
+      assert.equal(request.tools, 'default')
+      assert.equal(request.permissionMode, 'plan')
+      assert.equal(request.dangerouslySkipPermissions, dangerouslySkipPermissions)
+      yield {type:'result',text:'ok'}
+    }
+    const cfg = providerConfig({tools:'read',permissionMode:'plan',dangerouslySkipPermissions})
+    assertNoReplay(await collect(new CodeBuddyAdapter(cfg, runner).stream(options)))
+  }
 })
 
 test('saved plugin credential flows to the runner as an auth token override', async () => {
   const seen: Array<string | undefined> = []
   const runner: Runner = async function* (request) { seen.push(request.authToken); yield {type:'result',text:'ok'} }
-  const cfg = resolveConfig({models:['hy3']},{})
+  const cfg = providerConfig({models:['hy3']})
   await collect(new CodeBuddyAdapter(cfg, runner, undefined, async () => 'tok').stream({...options, model:'hy3'}))
   await collect(new CodeBuddyAdapter(cfg, runner, undefined, async () => { throw new Error('unreadable') }).stream({...options, model:'hy3'}))
   await collect(new CodeBuddyAdapter(cfg, runner).stream({...options, model:'hy3'}))
   assert.deepEqual(seen, ['tok', undefined, undefined])
 })
 
-test('resolveModel exposes 思考等级 efforts and stream forwards only valid effort', async () => {  const cfg = resolveConfig({models:['hy3']},{})
+test('resolveModel exposes 思考等级 efforts and stream forwards only valid effort', async () => {  const cfg = providerConfig({models:['hy3']})
   const resolved = await new CodeBuddyAdapter(cfg, async function* () { yield {type:'result',text:''} }).resolveModel('codebuddy','hy3')
   assert.deepEqual(resolved.reasoning?.efforts.map(e => e.id), [...CODEBUDDY_EFFORTS])
   assert.equal(new Set(resolved.reasoning!.efforts.map(e => e.name)).size, CODEBUDDY_EFFORTS.length)

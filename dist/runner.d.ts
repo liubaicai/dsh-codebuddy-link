@@ -1,8 +1,11 @@
+import { type ChildProcess } from 'node:child_process';
 import { type BridgeEvent } from './protocol.ts';
 export type { BridgeEvent } from './protocol.ts';
 export interface CodeBuddyRequest {
     prompt: string;
     systemPrompt?: string;
+    appendSystemPrompt?: string;
+    dangerouslySkipPermissions?: boolean;
     cwd: string;
     model?: string;
     effort?: string;
@@ -30,5 +33,6 @@ export declare function resolveCodeBuddyBin(bin?: string, cwd?: string): Promise
  * a real Node executable simply ignores the variable.
  */
 export declare function childEnv(authToken?: string): NodeJS.ProcessEnv;
+export declare function killTree(child: ChildProcess): Promise<void>;
 /** One fresh CLI process per call; the complete conversation belongs in prompt. */
 export declare function runCodeBuddy(request: CodeBuddyRequest): AsyncGenerator<BridgeEvent>;

@@ -37,6 +37,10 @@ function parseStatus(value) {
         || !value.catalogModels.every(model => isRecord(model) && typeof model.id === 'string' && typeof model.name === 'string')
         || !['ok', 'unavailable', 'auth-required', 'error'].includes(String(value.account.status)))
         throw new Error('服务端状态格式无效');
+    // Missing fields from older servers keep the safe defaults; reject malformed new values.
+    const dangerouslySkipPermissions = c.dangerouslySkipPermissions === undefined ? false : c.dangerouslySkipPermissions;
+    if (typeof dangerouslySkipPermissions !== 'boolean')
+        throw new Error('服务端状态格式无效');
     const reasoningEffort = c.reasoningEffort ?? 'auto';
     const maxConcurrency = c.maxConcurrency ?? 2;
     const queueTimeoutMs = c.queueTimeoutMs ?? 600000;
@@ -45,7 +49,7 @@ function parseStatus(value) {
         || !bounded(queueTimeoutMs, 1, 2147483647) || !bounded(stallWarnMs, 0, 2147483647))
         throw new Error('服务端状态格式无效');
     return { config: { enabled: c.enabled, permissionMode: c.permissionMode, models: c.models, hiddenModels: c.hiddenModels,
-            defaultModel: c.defaultModel, tools: c.tools, reasoningEffort, maxConcurrency, queueTimeoutMs, stallWarnMs },
+            defaultModel: c.defaultModel, tools: c.tools, dangerouslySkipPermissions, reasoningEffort, maxConcurrency, queueTimeoutMs, stallWarnMs },
         account: value.account,
         catalogModels: value.catalogModels.map(model => ({ id: model.id, name: model.name })),
         modelMessage: typeof value.modelMessage === 'string' ? value.modelMessage : undefined,
@@ -275,7 +279,8 @@ function SettingsPanel() {
             if (action !== 'refresh') {
                 const endpoint = action === 'initial' ? 'status' : action;
                 const result = await request(endpoint, endpoint === 'status' ? undefined : endpoint === 'models' ? {} : {
-                    permissionMode: config.permissionMode, models: config.models, hiddenModels: config.hiddenModels,
+                    permissionMode: config.permissionMode, dangerouslySkipPermissions: config.dangerouslySkipPermissions,
+                    models: config.models, hiddenModels: config.hiddenModels,
                     defaultModel: config.defaultModel, tools: config.tools, reasoningEffort: config.reasoningEffort,
                     maxConcurrency: config.maxConcurrency, queueTimeoutMs: config.queueTimeoutMs, stallWarnMs: config.stallWarnMs,
                 });
@@ -336,7 +341,10 @@ function SettingsPanel() {
         placeholder: '粘贴登录 JSON，仅提交到本插件；成功或取消后清空',
         onChange: (event) => setAuthContent(event.target.value) })), h('div', { style: row }, h('button', { type: 'button', style: authControl, disabled: !!busy || authBusy || !status || !!authFlow || !authContent.trim(),
         onClick: () => void authenticate('import') }, '导入登录信息'), h('button', { type: 'button', style: authControl, disabled: authBusy || !!authFlow || !authContent,
-        onClick: () => { setAuthContent(''); setAuthError(''); setAuthNotice('已取消导入。'); } }, '取消导入'))), h('section', { style: box, 'aria-label': '账户积分' }, h('div', { style: row }, h('h3', { style: { margin: 0 } }, '账户与积分'), h('button', { type: 'button', disabled: !!busy || authBusy || !status, onClick: () => void load('refresh') }, '刷新账户')), h('p', null, `账户状态：${account ? accountLabels[account.status] : '未知'}`), account?.message ? h('p', null, text(account.message)) : null, h('div', { style: row }, h('span', null, `剩余：${amount(account?.remaining)}`), h('span', null, `总额：${amount(account?.total)}`), h('span', null, `已用：${amount(account?.used)}`)), h('p', null, `单位：${text(account?.unit)}；更新时间：${text(account?.updatedAt)}`), h('p', null, `来源：${text(account?.source)}`), h('p', null, '是否与 WorkBuddy 共享账户或积分，以接口返回为准。缺失字段显示“未知”，不推算余额。进入设置、手动刷新或登录成功后查询账户；账户可用时自动获取模型列表，不自动轮询外部服务。')), draft ? h('fieldset', { disabled: !!busy, style: { ...box, minWidth: 0 } }, h('legend', null, '模型与独立委派设置'), h('label', { style: field }, '权限模式', h('select', { value: draft.permissionMode, onChange: (event) => update({ permissionMode: event.target.value }) }, !validMode ? h('option', { value: draft.permissionMode, disabled: true }, `未知模式：${draft.permissionMode}`) : null, h('option', { value: 'dontAsk' }, 'dontAsk — 不询问'), h('option', { value: 'plan' }, 'plan — 规划模式'), h('option', { value: 'acceptEdits' }, 'acceptEdits — 接受编辑'))), h('p', null, '权限模式仅对独立委派 CodeBuddy 工具生效；provider 工具权限仍由 DSH 管理。'), h('div', { style: row }, h('h3', { style: { margin: 0 } }, '启用模型'), h('button', { type: 'button', disabled: !!busy || authBusy, onClick: () => void load('models') }, '获取模型列表')), h('p', null, status?.modelMessage || '获取列表后勾选模型，选择默认模型并保存。'), ...[...models].map(([id, label]) => h('label', { key: id, style: { display: 'block', marginBottom: '8px', overflowWrap: 'anywhere' } }, h('input', { type: 'checkbox', checked: enabledModels.includes(id),
+        onClick: () => { setAuthContent(''); setAuthError(''); setAuthNotice('已取消导入。'); } }, '取消导入'))), h('section', { style: box, 'aria-label': '账户积分' }, h('div', { style: row }, h('h3', { style: { margin: 0 } }, '账户与积分'), h('button', { type: 'button', disabled: !!busy || authBusy || !status, onClick: () => void load('refresh') }, '刷新账户')), h('p', null, `账户状态：${account ? accountLabels[account.status] : '未知'}`), account?.message ? h('p', null, text(account.message)) : null, h('div', { style: row }, h('span', null, `剩余：${amount(account?.remaining)}`), h('span', null, `总额：${amount(account?.total)}`), h('span', null, `已用：${amount(account?.used)}`)), h('p', null, `单位：${text(account?.unit)}；更新时间：${text(account?.updatedAt)}`), h('p', null, `来源：${text(account?.source)}`), h('p', null, '是否与 WorkBuddy 共享账户或积分，以接口返回为准。缺失字段显示“未知”，不推算余额。进入设置、手动刷新或登录成功后查询账户；账户可用时自动获取模型列表，不自动轮询外部服务。')), draft ? h('fieldset', { disabled: !!busy, style: { ...box, minWidth: 0 } }, h('legend', null, '模型与独立委派设置'), h('p', null, 'Provider 通过 ACP stdio 使用 CodeBuddy CLI 原生完整工具执行，不再提供 bridge/工具协议解析模式。'), h('p', { role: 'alert' }, '警告：ACP 原生工具绕过 DSH 文件沙箱与确认流程，可直接读写文件、执行命令；仅在信任当前工作区时使用。'), h('label', { style: { display: 'block', marginBottom: '8px' } }, h('input', { type: 'checkbox', name: 'dangerouslySkipPermissions', checked: draft.dangerouslySkipPermissions,
+        onChange: (event) => {
+            update({ dangerouslySkipPermissions: event.target.checked });
+        } }), '危险：跳过 CLI 权限检查（dangerouslySkipPermissions）'), h('p', { role: 'note' }, '默认关闭。勾选后传入 --dangerously-skip-permissions；CLI 仍可能要求高风险确认，ACP 客户端不会自动批准残余权限请求。CLI 不受 DSH 沙箱与确认流程保护。此标志仅作用于 provider 主调用，不会隐式应用到独立委派 codebuddy_ask 与标题/压缩等后台请求。'), h('label', { style: field }, '权限模式', h('select', { value: draft.permissionMode, onChange: (event) => update({ permissionMode: event.target.value }) }, !validMode ? h('option', { value: draft.permissionMode, disabled: true }, `未知模式：${draft.permissionMode}`) : null, h('option', { value: 'dontAsk' }, 'dontAsk — 不询问'), h('option', { value: 'plan' }, 'plan — 规划模式'), h('option', { value: 'acceptEdits' }, 'acceptEdits — 接受编辑'))), h('p', null, '权限模式用于独立委派 CodeBuddy 工具与 ACP CLI（未跳过权限检查时）。'), h('div', { style: row }, h('h3', { style: { margin: 0 } }, '启用模型'), h('button', { type: 'button', disabled: !!busy || authBusy, onClick: () => void load('models') }, '获取模型列表')), h('p', null, status?.modelMessage || '获取列表后勾选模型，选择默认模型并保存。'), ...[...models].map(([id, label]) => h('label', { key: id, style: { display: 'block', marginBottom: '8px', overflowWrap: 'anywhere' } }, h('input', { type: 'checkbox', checked: enabledModels.includes(id),
         onChange: (event) => update({
             models: event.target.checked ? [...new Set([...draft.models, id])] : draft.models,
             hiddenModels: event.target.checked ? draft.hiddenModels.filter(hidden => hidden !== id) : [...new Set([...draft.hiddenModels, id])],

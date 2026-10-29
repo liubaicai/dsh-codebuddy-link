@@ -156,7 +156,8 @@ test('call/document/depth limits cover provider and string routes', () => {
 
 async function replay(value: unknown, mode: 'structured'|'result'|'stream'): Promise<StreamChunk[]> {
   const runner: Runner=async function* (request) {
-    assert.equal(request.tools,'');assert.equal(request.jsonSchema,undefined)
+    assert.equal(request.tools,'default');assert.equal(request.jsonSchema,undefined)
+    assert.equal(request.cwd,process.cwd())
     yield {type:'usage',input:100,output:12,cacheRead:20,cacheWrite:0}
     if(mode==='structured') yield {type:'result',text:'',structuredOutput:value}
     else {
@@ -166,26 +167,33 @@ async function replay(value: unknown, mode: 'structured'|'result'|'stream'): Pro
     }
   }
   const chunks:StreamChunk[]=[]
-  for await(const c of new CodeBuddyAdapter(resolveConfig({},{}),runner).stream({provider:'codebuddy',model:'default',messages:[],tools})) chunks.push(c)
+  for await(const c of new CodeBuddyAdapter(resolveConfig({workspaceRoot:process.cwd()},{}),runner).stream({provider:'codebuddy',model:'default',messages:[],tools})) chunks.push(c)
   return chunks
 }
-test('every provider format works through structuredOutput, result and fragmented stream', async()=>{
+function assertPlainFinal(out: StreamChunk[], expected: string) {
+  assert.equal(out.filter(c=>c.type==='tool-call-delta'||c.type==='block-start'&&c.blockType==='tool-call'||c.type==='block-end'&&c.block.type==='tool-call').length,0)
+  assert.equal(out.filter(c=>c.type==='text-delta').map(c=>c.text).join(''),expected)
+  assert.deepEqual(out.filter(c=>c.type==='usage').map(c=>c.usage),[{inputTokens:100,outputTokens:12,cacheReadTokens:20,cacheWriteTokens:0}])
+  assert.equal(out.filter(c=>c.type==='finish').length,1)
+  const last=out.at(-1);assert.equal(last?.type==='finish'&&last.reason.kind,'stop')
+}
+test('fixed ACP never interprets provider envelopes in structuredOutput, result or fragmented stream', async()=>{
   for(const [,make] of cases) for(const mode of ['structured','result','stream'] as const) {
-    const out=await replay(make(args),mode)
-    assert.equal(out.filter(c=>c.type==='tool-call-delta').length,1)
-    assert.equal(out.filter(c=>c.type==='finish').length,1)
-    const last=out.at(-1);assert.equal(last?.type==='finish'&&last.reason.kind,'tool-calls')
+    const value=make(args), text=JSON.stringify(value)
+    const out=await replay(value,mode)
+    assertPlainFinal(out,mode==='structured'?'':text)
+    assert.equal(out.filter(c=>c.type==='reasoning-delta').map(c=>c.text).join(''),mode==='stream'?text:'')
   }
 })
-test('invalid trailing blocks emit diagnostic text but no executable calls and retain usage', async()=>{
+test('malformed trailing blocks remain verbatim text or ignored structured metadata, never parse failures', async()=>{
   for(const value of invalid) {
-    // Use arrays to place a valid call before every invalid structured member.
+    // A valid executable-looking prefix must not trigger parsing of any suffix.
     const combined=typeof value==='string'?JSON.stringify({text:'checking',toolCalls:[call(args)]})+'\n'+value:[{text:'checking',toolCalls:[call(args)]},value]
-    const out=await replay(combined,'structured')
-    assert.equal(out.filter(c=>c.type==='tool-call-delta'||c.type==='block-start'&&c.blockType==='tool-call').length,0)
-    assert.match(out.filter(c=>c.type==='text-delta').map(c=>c.text).join(''), /响应解析失败/)
-    assert.equal(out.filter(c=>c.type==='usage').length,1)
-    assert.equal(out.filter(c=>c.type==='finish').length,1)
-    const last=out.at(-1);assert.equal(last?.type==='finish'&&last.reason.kind,'error')
+    for(const mode of ['structured','result','stream'] as const) {
+      const out=await replay(combined,mode)
+      const text=typeof combined==='string'?combined:JSON.stringify(combined)
+      assertPlainFinal(out,mode==='structured'?'':text)
+      assert.equal(out.filter(c=>c.type==='reasoning-delta').map(c=>c.text).join(''),mode==='stream'?text:'')
+    }
   }
 })

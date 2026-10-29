@@ -11,12 +11,17 @@ test('disabled models cannot run even through stale session selection', async ()
   assert.equal(called,false)
 })
 
-test('selected model reaches CLI while provider tools remain DSH-owned', async () => {
+test('selected model reaches native provider independently of ask tools', async () => {
+  let called = false
   const runner: Runner = async function* (request) {
-    assert.equal(request.model,'hy3'); assert.equal(request.tools,''); assert.equal(request.permissionMode,'dontAsk')
+    called = true
+    assert.equal(request.model,'hy3'); assert.equal(request.tools,'default'); assert.equal(request.permissionMode,'acceptEdits')
+    assert.equal(request.dangerouslySkipPermissions,false)
     yield {type:'result',text:'ok'}
   }
-  const adapter = new CodeBuddyAdapter(resolveConfig({models:['hy3'],permissionMode:'acceptEdits',tools:'Read'},{}),runner)
+  const adapter = new CodeBuddyAdapter(resolveConfig({models:['hy3'],permissionMode:'acceptEdits',tools:'Read',workspaceRoot:process.cwd()},{}),runner)
   const chunks = []; for await (const chunk of adapter.stream({provider:'codebuddy',model:'hy3',messages:[]})) chunks.push(chunk)
-  assert.equal(chunks.at(-1)?.type,'finish')
+  assert.equal(called,true)
+  const finish = chunks.at(-1)
+  assert.equal(finish?.type === 'finish' ? finish.reason.kind : undefined,'stop')
 })

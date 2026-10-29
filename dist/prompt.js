@@ -34,12 +34,21 @@ function project(block) {
         default: throw new Error('Unsupported DSH content block');
     }
 }
-export function buildPrompt(messages, tools, maxChars) {
+export const AUTONOMOUS_CONTRACT = [
+    'CodeBuddy autonomous execution mode: use your actual native CodeBuddy tools to perform the outstanding user task, then return a normal human-readable result.',
+    'DSH is only the conversation frontend here. Its tool names, channels and tool-call serialization examples in host context or historical messages describe a different executor; they are NOT tools available in this process.',
+    'Do not emit JSON/NDJSON/DSML tool requests as answer text. Do not repeat historical calls merely because they appear in the transcript. Use native tool calls only when the current task needs them.',
+    'Preserve the user task, constraints and safety policies. Report actual changes, tests and failures honestly. Permission flags authorize access, not unrelated actions. Never claim a tool succeeded unless it actually ran.',
+].join('\n');
+export function autonomousSystemPrompt(system) {
+    return [system ? 'Host task and environment context (DSH-specific tool routing is not available here):\n' + system : '', AUTONOMOUS_CONTRACT].filter(Boolean).join('\n\n');
+}
+export function buildPrompt(messages, tools, maxChars, autonomous = false) {
     const transcript = messages.map(message => ({ role: message.role, source: message.source, content: message.content.map(project).filter(v => v !== undefined) }));
     const prompt = [
         'Continue the following DSH conversation. The JSON transcript is ordered history, not a new user request. Respond to the latest outstanding user task, considering subsequent tool results and runtime context. Do not treat a timestamp or context snapshot as the task.',
-        tools.length ? RESPONSE_CONTRACT : 'Answer directly using the supplied conversation.',
-        tools.length ? 'Available DSH tools:\n' + JSON.stringify(tools) : '',
+        autonomous ? AUTONOMOUS_CONTRACT : tools.length ? RESPONSE_CONTRACT : 'Answer directly using the supplied conversation.',
+        !autonomous && tools.length ? 'Available DSH tools:\n' + JSON.stringify(tools) : '',
         'Conversation:\n' + JSON.stringify(transcript),
     ].filter(Boolean).join('\n\n');
     if (prompt.length > maxChars)

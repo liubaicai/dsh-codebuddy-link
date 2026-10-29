@@ -178,7 +178,7 @@ test('mount refreshes account then models once; unknown credits remain unknown',
   const tree = app.render();
   assert.match(content(tree), /剩余：未知.*总额：未知.*已用：未知/);
   assert.match(content(tree), /WorkBuddy.*以接口返回为准/);
-  assert.match(content(tree), /仅对独立委派 CodeBuddy 工具生效；provider 工具权限仍由 DSH 管理/);
+  assert.match(content(tree), /权限模式用于独立委派 CodeBuddy 工具与 ACP CLI（未跳过权限检查时）/);
   app.render();
   assert.equal(app.calls.length, 3);
   assert.equal(app.calls[0]!.url, '/plugins/codebuddy-link/status');
@@ -219,7 +219,7 @@ test('custom models, visibility, default and tools serialize exact config contra
   const app = mounted([{ value: payload() }, { value: payload() }]);
   app.render(); await settle();
   let tree = app.render();
-  const checks = nodes(tree).filter(node => node.type === 'input' && node.props.type === 'checkbox');
+  const checks = nodes(tree).filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.name !== 'dangerouslySkipPermissions');
   assert.deepEqual(checks.map(node => node.props.checked), [true, false, true]);
   checks[0]!.props.onChange({ target: { checked: false } });
   assert.equal(control(app.render(), '默认模型', 'select').props.value, 'custom');
@@ -236,7 +236,7 @@ test('custom models, visibility, default and tools serialize exact config contra
   await settle();
   assert.equal(app.calls.length, 4);
   assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/config');
-  assert.deepEqual(JSON.parse(app.calls[3]!.init.body), { permissionMode: 'acceptEdits', models: ['basic', 'hidden', 'custom', 'new-model'], hiddenModels: ['hidden', 'basic'], defaultModel: 'new-model', tools: 'Read', reasoningEffort:'auto', maxConcurrency:2, queueTimeoutMs:600000, stallWarnMs:90000 });
+  assert.deepEqual(JSON.parse(app.calls[3]!.init.body), { permissionMode: 'acceptEdits', dangerouslySkipPermissions: false, models: ['basic', 'hidden', 'custom', 'new-model'], hiddenModels: ['hidden', 'basic'], defaultModel: 'new-model', tools: 'Read', reasoningEffort:'auto', maxConcurrency:2, queueTimeoutMs:600000, stallWarnMs:90000 });
   assert.match(content(app.render()), /设置已保存/);
 });
 
@@ -255,9 +255,9 @@ test('HTTP errors are visible without reporting success or discarding edits', as
 test('hiding every model requires a nonempty enabled default before saving', async () => {
   const app = mounted();
   app.render(); await settle();
-  let checks = nodes(app.render()).filter(node => node.type === 'input' && node.props.type === 'checkbox');
+  let checks = nodes(app.render()).filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.name !== 'dangerouslySkipPermissions');
   checks[0]!.props.onChange({ target: { checked: false } });
-  checks = nodes(app.render()).filter(node => node.type === 'input' && node.props.type === 'checkbox');
+  checks = nodes(app.render()).filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.name !== 'dangerouslySkipPermissions');
   checks[2]!.props.onChange({ target: { checked: false } });
   let tree = app.render();
   assert.equal(control(tree, '默认模型', 'select').props.value, '');
@@ -265,7 +265,7 @@ test('hiding every model requires a nonempty enabled default before saving', asy
   const placeholder = nodes(control(tree, '默认模型', 'select')).find(node => node.type === 'option' && node.props.value === '');
   assert.equal(placeholder?.props.disabled, true);
   assert.match(content(placeholder), /请选择/);
-  checks = nodes(tree).filter(node => node.type === 'input' && node.props.type === 'checkbox');
+  checks = nodes(tree).filter(node => node.type === 'input' && node.props.type === 'checkbox' && node.props.name !== 'dangerouslySkipPermissions');
   checks[0]!.props.onChange({ target: { checked: true } });
   control(app.render(), '默认模型', 'select').props.onChange({ target: { value: 'basic' } });
   tree = app.render();
@@ -413,6 +413,43 @@ test('successful auth clears JSON even when its status refresh fails', async () 
   assert.equal(control(app.render(), '导入登录 JSON', 'textarea').props.value, '');
   assert.match(content(app.render()), /状态刷新失败/);
   assert.doesNotMatch(content(app.render()), /SENSITIVE/);
+});
+
+test('danger toggle is always enabled and stale executionMode fields are ignored', async () => {
+  const saved = {...payload(), config:{...payload().config, dangerouslySkipPermissions:true}};
+  const app = mounted([{value:payload()}, {value:saved}]); app.render(); await settle();
+  const danger = () => nodes(app.render()).find(node => node.props.name === 'dangerouslySkipPermissions')!;
+  assert.equal(danger().props.checked, false);
+  assert.notEqual(danger().props.disabled, true);
+  assert.doesNotMatch(content(app.render()), /Provider 执行模式/);
+  assert.match(content(app.render()), /不再提供 bridge\/工具协议解析模式/);
+  assert.match(content(app.render()), /ACP 原生工具绕过 DSH 文件沙箱与确认流程/);
+  danger().props.onChange({target:{checked:true}});
+  button(app.render(), '保存设置').props.onClick(); await settle();
+  const body = JSON.parse(app.calls[3]!.init.body);
+  assert.equal(body.executionMode, undefined); assert.equal(body.dangerouslySkipPermissions, true);
+  assert.equal(danger().props.checked, true);
+  // A mixed-version server still echoing the retired field cannot re-introduce the switch.
+  const stale = {...payload(), config:{...payload().config, executionMode:'bridge', dangerouslySkipPermissions:true}};
+  const older = mounted([{value:stale}]); older.render(); await settle();
+  const staleDanger = () => nodes(older.render()).find(node => node.props.name === 'dangerouslySkipPermissions')!;
+  assert.equal(staleDanger().props.checked, true); assert.notEqual(staleDanger().props.disabled, true);
+  assert.doesNotMatch(content(older.render()), /Provider 执行模式/);
+});
+
+test('malformed execution settings fail closed rather than enabling native tools', async () => {
+  for (const patch of [{dangerouslySkipPermissions:'true'}, {dangerouslySkipPermissions:1}, {dangerouslySkipPermissions:null}]) {
+    const app = harness([{value:{...payload(), config:{...payload().config, ...patch}}}]);
+    app.render(); await settle();
+    assert.match(content(app.render()), /服务端状态格式无效/);
+    assert.equal(button(app.render(), '保存设置'), undefined);
+    assert.equal(app.calls.length, 1);
+  }
+  // Retired executionMode echoes are ignored rather than fatal.
+  const app = harness([{value:{...payload(), config:{...payload().config, executionMode:'native'}}}]);
+  app.render(); await settle();
+  assert.doesNotMatch(content(app.render()), /服务端状态格式无效/);
+  assert.ok(button(app.render(), '保存设置'));
 });
 
 test('runtime controls default for legacy payloads, validate ranges and serialize settings', async () => {

@@ -14,7 +14,8 @@ export function registerSettingsRoutes(server, store, notify, refreshAccount = a
         config: { enabled: store.config.enabled, permissionMode: store.config.permissionMode, models: store.config.models,
             hiddenModels: store.config.hiddenModels, defaultModel: store.config.defaultModel, tools: store.config.tools,
             reasoningEffort: store.config.reasoningEffort, maxConcurrency: store.config.maxConcurrency,
-            queueTimeoutMs: store.config.queueTimeoutMs, stallWarnMs: store.config.stallWarnMs },
+            queueTimeoutMs: store.config.queueTimeoutMs, stallWarnMs: store.config.stallWarnMs,
+            dangerouslySkipPermissions: store.config.dangerouslySkipPermissions },
         runs: publicRuns(readRuns()),
         account, catalogModels: [...new Map([...catalog, ...store.config.models.filter(id => !catalog.some(m => m.id === id)).map(id => ({ id, name: id === 'default' ? 'CodeBuddy CLI 默认模型' : id }))].map(m => [m.id, m])).values()],
     });

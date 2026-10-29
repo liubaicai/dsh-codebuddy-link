@@ -26,20 +26,29 @@ test('plain-text fallback never swallows empty or recognizable damaged call outp
 
 test('adapter completes tool-result continuation with plain final text and retains usage', async () => {
   const runner: Runner = async function* (request) {
-    assert.equal(request.tools, '')
+    assert.equal(request.tools, 'default')
+    assert.equal(request.cwd, process.cwd())
     assert.equal(request.jsonSchema, undefined)
     assert.ok(request.prompt.includes('tool-result'))
-    yield {type:'text',delta:raw}
+    yield {type:'text',delta:'Inspecting prior tool results.\n'}
+    yield {type:'reasoning',delta:'Native progress.\n'}
+    yield {type:'tool-start',id:'native-1',name:'pwsh',input:{command:'PRIVATE-NATIVE-INPUT'}}
+    yield {type:'tool-end',id:'native-1',name:'pwsh',output:'PRIVATE-NATIVE-OUTPUT'}
     yield {type:'usage',input:53844,output:400,cacheRead:51072,cacheWrite:0}
     yield {type:'result',text:raw}
   }
   const messages = [{id:'r',role:'user',source:{kind:'user'},content:[{type:'tool-result',toolCallId:'previous',content:[{type:'text',text:'mode: native'}]}]}] as Message[]
   const out: StreamChunk[] = []
-  for await (const chunk of new CodeBuddyAdapter(resolveConfig({},{}),runner).stream({provider:'codebuddy',model:'default',messages,tools})) out.push(chunk)
+  for await (const chunk of new CodeBuddyAdapter(resolveConfig({workspaceRoot:process.cwd()},{}),runner).stream({provider:'codebuddy',model:'default',messages,tools})) out.push(chunk)
   assert.deepEqual(out.filter(c => c.type === 'text-delta').map(c => c.text), [raw])
-  assert.equal(out.filter(c => c.type === 'tool-call-delta').length, 0)
+  assert.deepEqual(out.filter(c => c.type === 'reasoning-delta').map(c => c.text), [
+    'Inspecting prior tool results.\n', 'Native progress.\n', '\n[CodeBuddy 执行: pwsh]\n', '\n[CodeBuddy 完成: pwsh]\n',
+  ])
+  assert.deepEqual(out.filter(c => c.type === 'block-end').map(c => c.block.type), ['reasoning', 'text'])
+  assert.doesNotMatch(JSON.stringify(out), /PRIVATE-NATIVE-INPUT|PRIVATE-NATIVE-OUTPUT/)
+  assert.equal(out.filter(c => c.type === 'tool-call-delta' || c.type === 'block-start' && c.blockType === 'tool-call').length, 0)
   assert.equal(out.filter(c => c.type === 'finish').length, 1)
-  assert.ok(out.some(c => c.type === 'usage' && c.usage.outputTokens === 400))
+  assert.deepEqual(out.filter(c => c.type === 'usage').map(c => c.usage), [{inputTokens:53844,outputTokens:400,cacheReadTokens:51072,cacheWriteTokens:0}])
   const last = out.at(-1)
   assert.equal(last?.type === 'finish' && last.reason.kind, 'stop')
 })

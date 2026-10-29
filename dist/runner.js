@@ -58,7 +58,7 @@ export function childEnv(authToken) {
     // stored login, so a token here authenticates even an unsigned-in or expired CLI install.
     return { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...(authToken ? { CODEBUDDY_AUTH_TOKEN: authToken } : {}) };
 }
-async function killTree(child) {
+export async function killTree(child) {
     if (!child.pid)
         return;
     if (process.platform === 'win32') {
@@ -95,8 +95,15 @@ export async function* runCodeBuddy(request) {
     const executable = await resolveCodeBuddyBin(request.bin, request.cwd);
     if (request.signal?.aborted)
         throw abortError();
-    const args = [...executable.args, '--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--input-format', 'text', '--permission-mode', request.permissionMode ?? 'dontAsk', '--tools', request.tools ?? '', '--no-session-persistence'];
-    for (const [flag, value] of [['--system-prompt', request.systemPrompt], ['--model', request.model], ['--effort', request.effort]]) {
+    if (request.dangerouslySkipPermissions !== undefined && typeof request.dangerouslySkipPermissions !== 'boolean')
+        throw new TypeError('dangerouslySkipPermissions must be boolean');
+    const args = [...executable.args, '--print', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--input-format', 'text', '--tools', request.tools ?? '', '--no-session-persistence'];
+    // Never combine a restrictive permission mode with the explicit bypass flag.
+    if (request.dangerouslySkipPermissions)
+        args.push('--dangerously-skip-permissions');
+    else
+        args.push('--permission-mode', request.permissionMode ?? 'dontAsk');
+    for (const [flag, value] of [['--system-prompt', request.systemPrompt], ['--append-system-prompt', request.appendSystemPrompt], ['--model', request.model], ['--effort', request.effort]]) {
         if (value !== undefined)
             args.push(flag, value);
     }
