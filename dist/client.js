@@ -72,6 +72,29 @@ function parsePool(value) {
     });
     return { mode: value.mode, selectedAccountId: value.selectedAccountId, accounts };
 }
+// Discovery messages are plugin-authored diagnostics, not arbitrary upstream text.
+// This classic entry cannot import the server module; fail closed on unknown prose.
+function parseModelMessage(value) {
+    if (typeof value !== 'string' || value.length > 1000)
+        return '';
+    const allowed = new Set([
+        '已获取中国区官方 CLI 目录。', '已获取国际区公开 CLI 目录。', '已合并安装包 CLI 模型候选。',
+        '国际区公开目录未能获取，可能需要国际区独立授权；当前候选不代表完整国际目录，未向国际域名发送中国区凭据。',
+        '模型候选未验证账户可用权限；实际调用仍受地区、账户权限与余额限制。',
+        ...['官方配置未返回可识别的 CLI 模型列表。', '拒绝模型配置重定向。', '官方模型配置需要有效授权。',
+            '官方模型配置请求失败。', '官方模型配置响应格式未知。', '模型发现超时。',
+            '模型发现失败；请检查网络或显式授权。'].map(message => `中国区：${message}`),
+    ]);
+    // Sentences may contain spaces in "CLI 目录"; consume complete known messages.
+    let rest = value;
+    while (rest) {
+        const part = [...allowed].find(message => rest === message || rest.startsWith(message + ' '));
+        if (!part)
+            return '';
+        rest = rest.slice(part.length).trimStart();
+    }
+    return value;
+}
 function parseStatus(value) {
     if (!isRecord(value) || !isRecord(value.config) || !isRecord(value.account))
         throw new Error('服务端状态格式无效');
@@ -96,6 +119,7 @@ function parseStatus(value) {
         || !bounded(queueTimeoutMs, 1, 2147483647) || !bounded(stallWarnMs, 0, 2147483647))
         throw new Error('服务端状态格式无效');
     return { settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0,
+        modelMessage: parseModelMessage(value.modelMessage),
         config: { enabled: c.enabled, permissionMode: c.permissionMode, models: c.models, hiddenModels: c.hiddenModels,
             defaultModel: c.defaultModel, tools: c.tools, dangerouslySkipPermissions, reasoningEffort, maxConcurrency, queueTimeoutMs, stallWarnMs },
         account: parseAccount(value.account), accountPool: parsePool(value.accountPool),
@@ -206,9 +230,21 @@ async function request(action, body) {
     catch {
         throw new Error('请求失败，请重试');
     }
-    // Never expose raw upstream errors: account endpoints can involve credentials.
-    if (!response.ok)
-        throw new Error(`请求失败（HTTP ${response.status}）`);
+    // Only /status's exact, plugin-authored repair diagnostic may cross this boundary.
+    // Account/auth mutations and unknown response text remain generic, never raw errors.
+    if (!response.ok) {
+        let diagnostic = '';
+        if (action === 'status') {
+            try {
+                const value = await response.json();
+                if (isRecord(value) && value.error === 'Cannot read CodeBuddy accounts; repair the account store before continuing') {
+                    diagnostic = 'CodeBuddy 账户存储无法读取，请修复账户存储后重试；不会回退本机登录。';
+                }
+            }
+            catch { /* Non-JSON errors retain the generic HTTP diagnostic. */ }
+        }
+        throw new Error(diagnostic || `请求失败（HTTP ${response.status}）`);
+    }
     let value;
     try {
         value = await response.json();
@@ -225,7 +261,7 @@ const text = (value) => typeof value === 'string' && value.trim() ? value : '未
 const amount = (value) => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '未知';
 const settingsErrorHelp = 'CodeBuddy 配置无法加载，模型调用已停用。请修复插件 settings.json 或管理员配置后重启 DSH；原文件未修改。';
 const safetyHelp = 'ACP 原生工具绕过 DSH 文件沙箱与确认流程，可直接读写文件、执行命令，也可能继承含凭据的环境变量或读取当前用户的文件。仅在信任当前工作区时使用。权限模式也用于独立委派；启用的独立委派工具同样不受 DSH 文件沙箱约束。';
-const dangerHelp = '默认关闭。启用后为主调用传入 --dangerously-skip-permissions。CLI 仍可能要求高风险确认，客户端不会自动批准残余请求。不会隐式应用到独立委派或标题、压缩等后台请求；CLI 不受 DSH 沙箱与确认流程保护。';
+const dangerHelp = '默认关闭。启用后为主调用传入 --dangerously-skip-permissions。若 CLI 仍请求权限，插件会选择其提供的单次允许选项；不会选择永久授权。不会隐式应用到独立委派或标题、压缩等后台请求；CLI 不受 DSH 沙箱与确认流程保护。';
 function renderRun(run) {
     const labels = { queued: '排队中', starting: '启动中', waiting: '等待响应', responding: '响应中', completed: '已完成', failed: '失败', cancelled: '已取消' };
     const failures = { 'timeout': '执行超时', 'queue-timeout': '排队超时', 'aborted': '已中止', 'error': '执行失败' };
@@ -477,7 +513,7 @@ function SettingsPanel() {
         style: pool?.mode === 'fixed' ? selectedStyle : {}, onClick: () => void manageAccount('account/select', { mode: 'fixed', accountId: pool?.selectedAccountId ?? pool?.accounts.find(account => account.enabled && account.authState === 'ready')?.id }) }, '固定账户'), h('button', { type: 'button', 'aria-pressed': pool?.mode === 'pool', disabled: accountLocked || !pool,
         style: pool?.mode === 'pool' ? selectedStyle : {}, onClick: () => void manageAccount('account/select', { mode: 'pool' }) }, '账户池')), ...(pool?.accounts ?? []).map(account => h('div', { key: account.id, 'aria-label': `账户 ${account.name}`, style: { borderTop: border, padding: '10px 0', display: 'flex', flexDirection: 'column', gap: '6px' } }, h('div', { style: { ...row, justifyContent: 'space-between' } }, h('div', { style: { ...row, minWidth: 0 } }, h('strong', { style: { overflowWrap: 'anywhere' } }, account.name), h('span', { style: { fontSize: '12px', color: secondary } }, !account.enabled ? '已停用' : account.authState === 'ready' ? '已授权' : '需授权'), pool.mode === 'fixed' && pool.selectedAccountId === account.id ? h('span', { style: { fontSize: '12px', color: accent } }, '当前') : null, account.active ? h('span', { style: { fontSize: '12px', color: secondary } }, `运行中 ${account.active}`) : null), h('div', { style: row }, h('button', { type: 'button', disabled: accountLocked || !account.enabled || account.authState !== 'ready' || (pool.mode === 'fixed' && pool.selectedAccountId === account.id), onClick: () => void manageAccount('account/select', { mode: 'fixed', accountId: account.id }) }, '使用'), h('button', { type: 'button', disabled: accountLocked, onClick: () => { setRenaming(account.id); setAccountName(account.name); setRemoving(null); } }, '重命名'), h('button', { type: 'button', disabled: accountLocked, 'aria-label': `${account.enabled ? '停用' : '启用'} ${account.name}`, onClick: () => void manageAccount('account/update', { id: account.id, enabled: !account.enabled }) }, account.enabled ? '停用' : '启用'), h('button', { type: 'button', disabled: accountLocked, onClick: () => void authenticate('start', account.id) }, '重新授权'), h('button', { type: 'button', disabled: accountLocked, onClick: () => void manageAccount('account/refresh', { id: account.id }) }, '刷新'), h('button', { type: 'button', disabled: accountLocked, onClick: () => { setRemoving(account.id); setRenaming(null); } }, '删除'))), quotaView(account.quota), renaming === account.id ? h('div', { style: row }, h('label', { style: { ...field, flex: '1 1 160px' } }, '账户名称', h('input', { value: accountName, maxLength: 100, disabled: accountLocked, autoComplete: 'off',
         onChange: (event) => setAccountName(event.target.value) })), h('button', { type: 'button', disabled: accountLocked || !accountName.trim(), onClick: () => void manageAccount('account/update', { id: account.id, name: accountName.trim() }) }, '确认重命名'), h('button', { type: 'button', disabled: accountLocked, onClick: () => setRenaming(null) }, '取消重命名')) : null, removing === account.id ? h('div', { role: 'group', 'aria-label': '确认删除账户', style: row }, h('span', null, '删除此账户？'), h('button', { type: 'button', disabled: accountLocked, onClick: () => void manageAccount('account/remove', { id: account.id }) }, '确认删除'), h('button', { type: 'button', disabled: accountLocked, onClick: () => setRemoving(null) }, '保留账户')) : null)), !pool?.accounts.length ? h('div', { style: { color: secondary } }, pool ? '暂无账户，添加账户以在浏览器登录。' : quotaView(status?.account)) : null, h('div', { role: 'status', 'aria-live': 'polite', style: { fontSize: '12px', color: secondary } }, authBusy ? '登录操作中…' : authNotice), authError ? h('p', { role: 'alert' }, authError) : null, authFlow ? h('div', { style: { marginTop: '8px' } }, authFlow.verificationUri ? h('a', { href: authFlow.verificationUri, target: '_blank', rel: 'noopener noreferrer', style: { margin: '0 0 8px' } }, '打开浏览器登录')
-        : h('p', { role: 'alert' }, '授权链接不安全，已禁止打开。请取消后重试。'), h('div', { style: row }, h('button', { type: 'button', disabled: locked, onClick: () => void authenticate('poll') }, '检查登录结果'), h('button', { type: 'button', disabled: locked, onClick: () => void authenticate('cancel') }, '取消登录'))) : null), draft ? h('fieldset', { disabled: locked, style: { ...box, minWidth: 0 } }, h('legend', null, h('span', { style: row }, '模型与独立委派设置', help('safety', '模型与独立委派安全说明', safetyHelp))), h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '10px' } }, h('h3', { style: { margin: 0 } }, '启用模型'), h('button', { type: 'button', disabled: locked, onClick: () => void load('models') }, '获取模型列表')), h('div', { role: 'group', 'aria-label': '启用模型', style: { ...row, gap: '6px', marginBottom: '14px' } }, ...[...models].map(([id, label]) => {
+        : h('p', { role: 'alert' }, '授权链接不安全，已禁止打开。请取消后重试。'), h('div', { style: row }, h('button', { type: 'button', disabled: locked, onClick: () => void authenticate('poll') }, '检查登录结果'), h('button', { type: 'button', disabled: locked, onClick: () => void authenticate('cancel') }, '取消登录'))) : null), draft ? h('fieldset', { disabled: locked, style: { ...box, minWidth: 0 } }, h('legend', null, h('span', { style: row }, '模型与独立委派设置', help('safety', '模型与独立委派安全说明', safetyHelp))), h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '10px' } }, h('h3', { style: { margin: 0 } }, '启用模型'), h('button', { type: 'button', disabled: locked, onClick: () => void load('models') }, '获取模型列表')), status?.modelMessage ? h('p', { role: 'status', 'aria-label': '模型发现说明' }, status.modelMessage) : null, h('div', { role: 'group', 'aria-label': '启用模型', style: { ...row, gap: '6px', marginBottom: '14px' } }, ...[...models].map(([id, label]) => {
         const enabled = enabledModels.includes(id);
         return h('button', { key: id, type: 'button', 'aria-pressed': enabled, 'aria-label': `${label} (${id})`,
             style: { borderRadius: '16px', overflowWrap: 'anywhere', ...(enabled ? selectedStyle : {}) },

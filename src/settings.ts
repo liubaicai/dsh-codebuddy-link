@@ -4,6 +4,8 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { resolveConfig, type PluginConfig } from './config.ts'
 
+const panelEditable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'reasoningEffort', 'dangerouslySkipPermissions'])
+// Persistence/internal updates also retain legacy administrator settings and discovered metadata.
 const editable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'tools', 'modelContext',
   'reasoningEffort', 'maxConcurrency', 'queueTimeoutMs', 'stallWarnMs', 'dangerouslySkipPermissions'])
 /** Keys written by older plugin versions. They are dropped on load so saved
@@ -36,6 +38,12 @@ export class SettingsStore {
       this.loadError = 'CodeBuddy settings could not be loaded. Provider and delegation are disabled. Repair the plugin settings.json file and restart DSH; the original file has not been changed.'
       this.config = resolveConfig({enabled:false, askTool:false, permissionMode:'dontAsk', tools:'', dangerouslySkipPermissions:false}, {})
     }
+  }
+  /** Browser patches cannot change administrator-only settings or discovery metadata. */
+  updateFromPanel(patch: unknown): PluginConfig {
+    const updates = withoutRetired(validateKeys(patch))
+    if (Object.keys(updates).some(key => !panelEditable.has(key))) throw new Error('Setting is administrator-only')
+    return this.update(updates)
   }
   update(patch: unknown): PluginConfig {
     if (this.loadError) throw new Error(this.loadError)

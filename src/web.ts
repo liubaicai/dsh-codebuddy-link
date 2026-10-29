@@ -99,7 +99,7 @@ export function registerSettingsRoutes(server: WebServerLike, store: SettingsSto
               notify()
               send(200,await snapshot()); return
             }
-            if (action === 'config') { store.update(body); notify() }
+            if (action === 'config') { store.updateFromPanel(body); notify() }
             else if (action === 'models' && refreshModels) {
               const version = generation
               modelPending ??= refreshModels().then(value => {
@@ -119,7 +119,15 @@ export function registerSettingsRoutes(server: WebServerLike, store: SettingsSto
             }
           }
           send(200,await snapshot())
-        } catch (error) { send(400,{error:action.startsWith('auth/') || action.startsWith('account/') ? '账户操作失败，请检查账户选择与授权状态。' : error instanceof Error ? error.message : 'Invalid request'}) }
+        } catch (error) {
+          // Snapshot/auth providers and filesystem errors may contain secrets or paths.
+          // Only this fixed store diagnostic is safe to relay; never echo arbitrary errors.
+          const accountStoreError = 'Cannot read CodeBuddy accounts; repair the account store before continuing'
+          send(400,{error: error instanceof Error && error.message === accountStoreError ? accountStoreError
+            : action.startsWith('auth/') || action.startsWith('account/') ? '账户操作失败，请检查账户选择与授权状态。'
+            : action === 'config' ? '设置保存失败，请检查设置或管理员配置。'
+            : action === 'models' ? '模型列表获取失败，请检查网络后重试。' : '状态读取失败，请检查配置与授权状态。'})
+        }
       })()
     }})
     if (typeof dispose === 'function') disposers.push(dispose as () => void)
@@ -149,8 +157,11 @@ function publicRuns(values: unknown[]): Record<string, unknown>[] {
       if (typeof run[key] === 'number' && Number.isFinite(run[key]) && run[key] >= 0) clean[key] = run[key]
     }
     if (['timeout', 'queue-timeout', 'aborted', 'error'].includes(String(run.failure))) clean.failure = run.failure
-    recent.push(clean)
-    recent.sort((a, b) => Number(b.queuedAt) - Number(a.queuedAt))
+    // Keep a bounded top five without sorting on every candidate. Insert after
+    // equal timestamps to preserve the original stable ordering.
+    const position = recent.findIndex(entry => Number(entry.queuedAt) < Number(run.queuedAt))
+    if (position >= 0) recent.splice(position, 0, clean)
+    else if (recent.length < 5) recent.push(clean)
     if (recent.length > 5) recent.pop()
   }
   return recent

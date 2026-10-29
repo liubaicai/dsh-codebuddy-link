@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.26
+
+- Isolate CLI authentication from the launching shell: strip inherited `CODEBUDDY_AUTH_TOKEN` casing variants and inject only the explicitly selected account token.
+- Prefer one-shot ACP permission options and reject persistent-only grants. Accept validated non-executing setup metadata while retaining session binding and inactivity rules. Preserve numeric-only model answers such as `404`.
+- Restrict HTTP settings changes to panel-owned keys without discarding existing administrator configuration. Display safe account-store repair diagnostics and model-discovery notices without exposing arbitrary upstream errors.
+- Document the existing credential-path restriction on symlinks and Windows junctions; retain fresh account-store validation and Unicode-safe preview truncation.
+
 ## 0.3.25
 
 - Honor the skip-permissions setting for residual ACP `session/request_permission` prompts: approve once using the CLI-provided allow option and continue the task when enabled; deny and fail with an actionable message when disabled. Never synthesize an option the CLI did not offer.

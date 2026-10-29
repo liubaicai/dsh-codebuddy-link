@@ -9,11 +9,20 @@ import { childEnv, killTree, resolveCodeBuddyBin } from "./runner.js";
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
 const validId = (value) => typeof value === 'string' || (typeof value === 'number' && Number.isSafeInteger(value));
-/** Selects the CLI's own allow-once style option; kind strings are not normalized across versions. */
-const allowOptionId = (value) => typeof value.optionId === 'string' && value.optionId
-    && ((value.optionId === 'allow_once' || value.optionId === 'always_allow' || value.optionId === 'yes')
-        || (typeof value.kind === 'string' && value.kind.startsWith('allow')))
-    ? value.optionId : undefined;
+/** Prefer explicit one-shot grants; never turn a residual prompt into a persistent grant. */
+const allowOptionRank = (value) => {
+    if (typeof value.optionId !== 'string' || !value.optionId || ['always_allow', 'allow_always'].includes(value.optionId))
+        return 0;
+    if (value.kind === 'allow_once')
+        return 2;
+    // Retain legacy `allow` and known ID-only aliases already supported here.
+    // Unknown/deny/persistent kinds must not gain approval through an ID alias.
+    if (value.kind !== undefined && value.kind !== 'allow')
+        return 0;
+    if (value.optionId === 'allow_once')
+        return 2;
+    return value.kind === 'allow' || value.optionId === 'yes' ? 1 : 0;
+};
 const protocolError = () => new Error('Invalid CodeBuddy ACP protocol message (content omitted)');
 const abortError = () => Object.assign(new Error('CodeBuddy ACP request aborted'), { name: 'AbortError' });
 const DEFAULT_TIMEOUT = 10 * 60 * 1000;
@@ -178,10 +187,10 @@ export async function* runCodeBuddyAcp(request) {
         const row = params.update;
         if (typeof row.sessionUpdate !== 'string')
             throw protocolError();
-        // CodeBuddy emits initial config metadata BEFORE answering session/new.
-        // Admit only that non-executing setup notification and bind its ID later.
+        // Initial non-executing metadata may precede the session/new response.
+        // Validate the allowlist and bind its ID later; metadata is not progress.
         if (!sessionId) {
-            if (![...pending.values()].some(entry => entry.method === 'session/new') || row.sessionUpdate !== 'config_option_update' || !isSessionMetadata(row))
+            if (![...pending.values()].some(entry => entry.method === 'session/new') || !isSessionMetadata(row))
                 throw protocolError();
             if (setupSessionId && setupSessionId !== params.sessionId)
                 throw protocolError();
@@ -274,7 +283,9 @@ export async function* runCodeBuddyAcp(request) {
                     // approve residual prompts when skipping is enabled, deny each one
                     // otherwise. Never synthesize an option the CLI did not offer.
                     if (request.dangerouslySkipPermissions) {
-                        const optionId = params.options.map(item => object(item) ? allowOptionId(item) : undefined).find(id => id !== undefined);
+                        const options = params.options.filter(object);
+                        const option = options.find(item => allowOptionRank(item) === 2) ?? options.find(item => allowOptionRank(item) === 1);
+                        const optionId = option?.optionId;
                         if (!optionId)
                             throw protocolError();
                         send({ jsonrpc: '2.0', id: value.id, result: { outcome: { outcome: 'selected', optionId } } });

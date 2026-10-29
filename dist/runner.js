@@ -76,7 +76,15 @@ function abortError() { const error = new Error('CodeBuddy request aborted'); er
 export function childEnv(authToken) {
     // The CLI's getAuthenticationAttributesSync checks CODEBUDDY_AUTH_TOKEN before its own
     // stored login, so a token here authenticates even an unsigned-in or expired CLI install.
-    return { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...(authToken ? { CODEBUDDY_AUTH_TOKEN: authToken } : {}) };
+    const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+    // Authentication belongs to the selected plugin account, never the launching shell.
+    // Remove casing variants too: Windows environment variable names are case-insensitive.
+    for (const key of Object.keys(env))
+        if (key.toUpperCase() === 'CODEBUDDY_AUTH_TOKEN')
+            delete env[key];
+    if (authToken)
+        env.CODEBUDDY_AUTH_TOKEN = authToken;
+    return env;
 }
 export async function killTree(child) {
     if (!child.pid)

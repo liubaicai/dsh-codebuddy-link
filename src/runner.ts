@@ -26,7 +26,7 @@ export interface CodeBuddyRequest {
   timeoutMs?: number;
   signal?: AbortSignal;
   jsonSchema?: Record<string, unknown>;
-  /** Bearer token forwarded as CODEBUDY_AUTH_TOKEN; overrides the CLI's own stored login. */
+  /** Bearer token forwarded as CODEBUDDY_AUTH_TOKEN; overrides the CLI's own stored login. */
   authToken?: string;
 }
 
@@ -93,7 +93,12 @@ function abortError(): Error { const error = new Error('CodeBuddy request aborte
 export function childEnv(authToken?: string): NodeJS.ProcessEnv {
   // The CLI's getAuthenticationAttributesSync checks CODEBUDDY_AUTH_TOKEN before its own
   // stored login, so a token here authenticates even an unsigned-in or expired CLI install.
-  return { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...(authToken ? { CODEBUDDY_AUTH_TOKEN: authToken } : {}) };
+  const env: NodeJS.ProcessEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
+  // Authentication belongs to the selected plugin account, never the launching shell.
+  // Remove casing variants too: Windows environment variable names are case-insensitive.
+  for (const key of Object.keys(env)) if (key.toUpperCase() === 'CODEBUDDY_AUTH_TOKEN') delete env[key];
+  if (authToken) env.CODEBUDDY_AUTH_TOKEN = authToken;
+  return env;
 }
 
 export async function killTree(child: ChildProcess): Promise<void> {

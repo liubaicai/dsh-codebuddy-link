@@ -28,7 +28,7 @@ npm install -g @tencent-ai/codebuddy-code
 需要本机安装 Git。公开仓库使用 HTTPS，不要求 SSH 密钥。将 `web` 替换成实际使用的 DSH profile：
 
 ```sh
-dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.25"
+dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.26"
 ```
 
 仓库**包含已构建的 dist**，安装不依赖 TypeScript、开发依赖或安装时构建脚本。CI 会重新构建并检查提交的产物，避免源码与产物不一致。
@@ -44,10 +44,10 @@ dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-lin
 从 [Releases](https://github.com/liubaicai/dsh-codebuddy-link/releases) 下载对应版本 `.tgz`，可使用同页 `SHA256SUMS.txt` 核对 SHA-256。进入下载目录后执行：
 
 ```powershell
-dsh plugin --profile web add .\dsh-codebuddy-link-0.3.25.tgz
+dsh plugin --profile web add .\dsh-codebuddy-link-0.3.26.tgz
 ```
 
-macOS/Linux 使用 `./dsh-codebuddy-link-0.3.25.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
+macOS/Linux 使用 `./dsh-codebuddy-link-0.3.26.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
 
 ### 4. 启用与升级
 
@@ -74,11 +74,11 @@ GitHub 安装或 Actions 不会读取你的 CodeBuddy 凭据；模型请求只�
 
 **设置页只提供浏览器授权，不再提供 JSON 导入或其 HTTP 端点。** 点击“添加账户”，打开官方链接，授权后点击“检查登录结果”；可以取消，约 10 分钟过期。最多 20 个账户；重复登录同一身份更新原账户，重新授权必须使用同一身份。
 
-凭据由服务端单独保存到 `${DSH_HOME}/plugins/dsh-codebuddy-link/accounts.json`（默认 `~/.dsh/...`），只保存 access token 和用户 ID，不保存 refresh token。状态接口只返回非敏感元数据，不返回凭据或用户 ID，也不写浏览器本地存储。文件是明文秘密，创建时使用 0600 权限；Windows 仍需通过系统 ACL 保护 DSH 用户目录。不要提交仓库或上传聊天。远程访问必须使用 HTTPS 和主机认证，禁止在公开未认证实例使用。
+凭据由服务端单独保存到 `${DSH_HOME}/plugins/dsh-codebuddy-link/accounts.json`（默认 `~/.dsh/...`），只保存 access token 和用户 ID，不保存 refresh token。状态接口只返回非敏感元数据，不返回凭据或用户 ID，也不写浏览器本地存储。文件是明文秘密，创建时使用 0600 权限；Windows 仍需通过系统 ACL 保护 DSH 用户目录。凭据存储路径及其祖先目录不允许符号链接或 Windows junction；请将 `DSH_HOME` 指向实际目录。不要提交仓库或上传聊天。远程访问必须使用 HTTPS 和主机认证，禁止在公开未认证实例使用。
 
 升级时自动将旧 `credentials.json` 迁移为第一个固定账户，原文件保留备份；存在新账户存储后不再读取旧文件。**删除全部账户仍保持托管状态，拒绝回退 CLI 本地身份。** 存储损坏或运行期间被外部删除也会明确失败。
 
-这些授权**用于中国区积分及模型配置查询，不会发送到国际区接口**。每次启动 CLI 前重新读取选中账户，将 token 仅通过子进程 `CODEBUDDY_AUTH_TOKEN` 注入（优先于 CLI 自身登录），不写进参数、日志或运行记录。确认认证失败时将该账户标记为需要重新授权；不会自动刷新 token、重试当前请求或重放操作。不会提取桌面凭据、解密系统凭据库或改动官方客户端文件。删除账户不撤销官方会话。
+这些授权**用于中国区积分及模型配置查询，不会发送到国际区接口**。每次启动 CLI 前重新读取选中账户，清除宿主继承的 `CODEBUDDY_AUTH_TOKEN`，仅通过该子进程环境变量注入所选账户的 token（优先于 CLI 自身登录），不写进参数、日志或运行记录。未提供账户 token 时只使用 CLI 本机登录，不继承启动 DSH 的终端身份。确认认证失败时将该账户标记为需要重新授权；不会自动刷新 token、重试当前请求或重放操作。不会提取桌面凭据、解密系统凭据库或改动官方客户端文件。删除账户不撤销官方会话。
 
 从未添加/迁移账户的安装仍保留旧的本机登录及积分文件配置方式 `DSH_CODEBUDDY_CREDENTIALS_FILE`；一旦启用多账户管理便不再回退。该积分文件使用下列结构（全部为占位值）：
 

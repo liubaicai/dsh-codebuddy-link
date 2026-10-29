@@ -12,7 +12,7 @@ import type { BridgeEvent } from '../src/protocol.ts';
 // Test traces prove both the RPC wire contract and subprocess termination.
 const CLI = String.raw`
 import { createInterface } from 'node:readline';
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 writeFileSync('server.pid', String(process.pid));
 writeFileSync('argv.json', JSON.stringify(process.argv.slice(2)));
@@ -25,7 +25,18 @@ let mode;
 input.on('line', line => {
  const row = JSON.parse(line);
  appendFileSync('wire.ndjson', line + '\n');
- if (row.method === 'initialize') return reply(row.id,{protocolVersion:1,agentCapabilities:{loadSession:true}});
+ const setup = existsSync('setup.json') ? JSON.parse(readFileSync('setup.json','utf8')) : null;
+ if (row.method === 'initialize') {
+  if(setup?.early)for(const params of setup.notifications)send({jsonrpc:'2.0',method:'session/update',params});
+  return reply(row.id,{protocolVersion:1,agentCapabilities:{loadSession:true}});
+ }
+ if (row.method === 'session/new' && setup) {
+  const frames=setup.notifications.map(params=>({jsonrpc:'2.0',method:'session/update',params}));
+  const emit=()=>{for(const frame of frames)send(frame);};
+  if(setup.stall){emit();setInterval(emit,100);return;}
+  if(setup.split){emit();setTimeout(()=>reply(row.id,{sessionId:'fresh-session'}),30);return;}
+  return process.stdout.write([...frames,{jsonrpc:'2.0',id:row.id,result:{sessionId:'fresh-session'}}].map(frame=>JSON.stringify(frame)+'\n').join(''));
+ }
  if (row.method === 'session/new') { update({sessionUpdate:'config_option_update',configOptions:[]}); }
  if (row.method === 'session/new') return process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:row.id,result:{sessionId:'fresh-session'}})+'\n'+JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:'fresh-session',update:{sessionUpdate:'available_commands_update',availableCommands:[]}}})+'\n');
  if (row.method === 'session/cancel') {writeFileSync('cancelled','yes'); if(mode==='orphan')process.exit(0); return;}
@@ -88,10 +99,21 @@ input.on('line', line => {
  if (mode === 'permission') return send({jsonrpc:'2.0',id:'permission-1',method:'session/request_permission',params:{sessionId:'fresh-session',toolCall:{toolCallId:'p',title:'SECRET_TOKEN HIGH CRITICAL'},options:[{optionId:'yes',name:'Allow',kind:'allow_once'}]}});
  if (mode.startsWith('permission-flow')) {
   const variant=mode.split(':')[1];
-  const options = variant==='named' ? [{optionId:'allow',name:'Allow',kind:'allow'},{optionId:'deny',name:'Deny',kind:'deny_once'}]
+  const cases = {
+   'persistent-first':[{optionId:'always_allow',kind:'allow_always'},{optionId:'once',kind:'allow_once'}],
+   'legacy-first':[{optionId:'legacy',kind:'allow'},{optionId:'once',kind:'allow_once'}],
+   'id-once':[{optionId:'always_allow'},{optionId:'allow_once'}],
+   'id-yes':[{optionId:'yes'}],
+   'persistent-only':[{optionId:'always_allow',kind:'allow_always'}],
+   'persistent-kind':[{optionId:'yes',kind:'allow_always'}],
+   'conflicting-id':[{optionId:'always_allow',kind:'allow_once'}],
+   'deny-alias':[{optionId:'allow_once',kind:'deny_once'}],
+   'unknown-kind':[{optionId:'yes',kind:'allow_future'}],
+  };
+  const options = cases[variant] ?? (variant==='named' ? [{optionId:'allow',name:'Allow',kind:'allow'},{optionId:'deny',name:'Deny',kind:'deny_once'}]
    : variant==='none' ? [{optionId:'maybe',name:'Maybe',kind:'other'}]
     : variant==='deny-only' ? [{optionId:'no',name:'Deny',kind:'deny_once'}]
-    : [{optionId:'no',name:'Deny',kind:'deny_once'},{optionId:'yes',name:'Allow',kind:'allow_once'}];
+    : [{optionId:'no',name:'Deny',kind:'deny_once'},{optionId:'yes',name:'Allow',kind:'allow_once'}]);
   send({jsonrpc:'2.0',id:'permission-1',method:'session/request_permission',params:{sessionId:'fresh-session',toolCall:{toolCallId:'p',title:'Read'},options}});
   input.once('line',line=>{const r=JSON.parse(line);appendFileSync('permission-reply.ndjson',line+'\n');
    if(r.id==='permission-1'){update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:' proceeded'}});reply(row.id,{stopReason:'end_turn'});}});
@@ -193,6 +215,58 @@ test('ACP v1 initializes with no host capabilities, creates fresh session, sends
     { type: 'result', sessionId: 'fresh-session', text: '中文😀 done' },
   ]);
   await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));
+});
+
+test('pre-session validated metadata is accepted without depending on stdout grouping', async t => {
+  for (const split of [false, true]) {
+    const f = await fixture(t);
+    const notifications = [
+      {sessionUpdate:'session_info_update',title:'Starting'},
+      {sessionUpdate:'current_mode_update',currentModeId:'default'},
+      {sessionUpdate:'available_commands_update',availableCommands:[]},
+      {sessionUpdate:'config_option_update',configOptions:[]},
+      {sessionUpdate:'usage_update',used:0,size:100},
+    ].map(update => ({sessionId:'fresh-session',update}));
+    await writeFile(join(f.cwd,'setup.json'),JSON.stringify({notifications,split}));
+    const events = await collect(runCodeBuddyAcp({...f,prompt:'messages'}));
+    assert.equal(events.at(-1)?.type,'result');
+    assert.equal(events.some(event=>event.type==='tool-start'||event.type==='usage'),false);
+  }
+});
+
+test('pre-session metadata keeps strict phase, shape and session binding checks', {timeout:60000}, async t => {
+  const info = {sessionUpdate:'session_info_update',title:'Starting'};
+  const cases = [
+    {notifications:[{sessionId:'fresh-session',update:info}],early:true},
+    {notifications:[{sessionId:'wrong-session',update:info}]},
+    {notifications:[{sessionId:'fresh-session',update:info},{sessionId:'other',update:info}]},
+    ...[
+      {sessionUpdate:'agent_message_chunk',content:{type:'text',text:'SECRET_TOKEN'}},
+      {sessionUpdate:'agent_thought_chunk',content:{type:'text',text:'SECRET_TOKEN'}},
+      {sessionUpdate:'tool_call',toolCallId:'never-execute',status:'pending'},
+      {sessionUpdate:'future_update'},
+      {sessionUpdate:'current_mode_update',currentModeId:42},
+      {sessionUpdate:'available_commands_update',availableCommands:[{}]},
+      {sessionUpdate:'config_option_update',configOptions:[{}]},
+    ].map(update=>({notifications:[{sessionId:'fresh-session',update}]})),
+  ];
+  for (const setup of cases) {
+    const f = await fixture(t);
+    await writeFile(join(f.cwd,'setup.json'),JSON.stringify(setup));
+    const events: BridgeEvent[] = [];
+    await assert.rejects(async()=>{for await(const event of runCodeBuddyAcp({...f,prompt:'messages'}))events.push(event);}, /Invalid or oversized CodeBuddy ACP stream/);
+    assert.deepEqual(events,[]);
+    assert.equal((await wire(f.cwd)).some(row=>row.method==='session/prompt'),false);
+    await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
+  }
+});
+
+test('pre-session metadata does not renew the progress-based idle timeout', {timeout:15000}, async t => {
+  const f = await fixture(t);
+  await writeFile(join(f.cwd,'setup.json'),JSON.stringify({stall:true,notifications:[{sessionId:'fresh-session',update:{sessionUpdate:'current_mode_update',currentModeId:'default'}}]}));
+  await assert.rejects(collect(runCodeBuddyAcp({...f,prompt:'messages',timeoutMs:1500})),{name:'TimeoutError'});
+  assert.equal((await wire(f.cwd)).some(row=>row.method==='session/prompt'),false);
+  await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
 });
 
 test('ACP preserves every message part and ID-less prefix without inventing finality or replaying opaque text', async t => {
@@ -304,12 +378,12 @@ test('without skip-permissions a residual prompt is denied and the turn fails cl
 });
 
 test('with skip-permissions a residual prompt is approved once and the task continues', async t => {
-  for (const variant of ['default','named']) {
+  for (const variant of ['default','named','persistent-first','legacy-first','id-once','id-yes']) {
     const f = await fixture(t);
     const events = await collect(runCodeBuddyAcp({ ...f, prompt: `permission-flow:${variant}`, dangerouslySkipPermissions: true }));
     const rows = await wire(f.cwd);
     const reply = JSON.parse(await readFile(join(f.cwd, 'permission-reply.ndjson'), 'utf8'));
-    const optionId = variant === 'named' ? 'allow' : 'yes';
+    const optionId = variant === 'named' ? 'allow' : variant.endsWith('-first') ? 'once' : variant === 'id-once' ? 'allow_once' : 'yes';
     assert.deepEqual(reply, { jsonrpc: '2.0', id: 'permission-1', result: { outcome: { outcome: 'selected', optionId } } });
     assert.equal(rows.some(row => row.method === 'session/cancel'), false);
     assert.deepEqual(events.at(-1), { type: 'result', sessionId: 'fresh-session', text: ' proceeded' });
@@ -318,7 +392,7 @@ test('with skip-permissions a residual prompt is approved once and the task cont
 });
 
 test('skip-permissions approval requires a real allow option from the CLI', async t => {
-  for (const variant of ['none','deny-only']) {
+  for (const variant of ['none','deny-only','persistent-only','persistent-kind','conflicting-id','deny-alias','unknown-kind']) {
     const f = await fixture(t);
     await assert.rejects(collect(runCodeBuddyAcp({ ...f, prompt: `permission-flow:${variant}`, dangerouslySkipPermissions: true })), /Invalid or oversized CodeBuddy ACP stream/);
     await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));

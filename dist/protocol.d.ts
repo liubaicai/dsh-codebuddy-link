@@ -59,8 +59,8 @@ export declare class CodeBuddyProtocol {
      * When the API call fails, the CLI relays the status line (e.g. "401
      * Unauthorized") as the entire assistant message. In --json-schema mode the
      * CLI then never emits a result row and never exits, so the request would
-     * hang until the timeout. A bare HTTP status line is never legitimate model
-     * output: fail fast instead of streaming it as text.
+     * hang until the timeout. Retain this status-line fail-fast heuristic only
+     * with a reason phrase; a numeric answer alone is ordinary model output.
      */
     private rejectEchoedHttpError;
     private delta;

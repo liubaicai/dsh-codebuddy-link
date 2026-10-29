@@ -16,7 +16,8 @@ const config = (value: unknown): boolean => {
 };
 
 /**
- * Non-executing ACP session metadata may follow session/prompt's response.
+ * Non-executing ACP session metadata may precede session/new's response or
+ * follow session/prompt's response.
  * Keep this allowlist explicit: message/tool/plan events are not metadata, and
  * unknown updates must not silently acquire permission to cross that boundary.
  * Shapes follow the ACP SessionUpdate schema; extension payloads stay opaque.

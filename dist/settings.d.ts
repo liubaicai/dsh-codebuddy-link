@@ -9,5 +9,7 @@ export declare class SettingsStore {
     /** A diagnostic-only configuration keeps recovery routes available, never execution. */
     readonly loadError?: string;
     constructor(entry?: Record<string, unknown>, path?: string);
+    /** Browser patches cannot change administrator-only settings or discovery metadata. */
+    updateFromPanel(patch: unknown): PluginConfig;
     update(patch: unknown): PluginConfig;
 }

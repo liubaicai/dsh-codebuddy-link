@@ -203,7 +203,29 @@ test('childEnv forces ELECTRON_RUN_AS_NODE so Electron hosts spawn plain Node ch
   try { assert.equal(childEnv().ELECTRON_RUN_AS_NODE, '1'); }
   finally { if (original === undefined) delete process.env.ELECTRON_RUN_AS_NODE; else process.env.ELECTRON_RUN_AS_NODE = original; }
 });
+test('childEnv strips inherited authentication without mutating the host environment', () => {
+  const keys = ['CODEBUDDY_AUTH_TOKEN', 'codebuddy_auth_token'];
+  const originals = keys.map(key => process.env[key]);
+  try {
+    for (const key of keys) process.env[key] = 'host-only-secret';
+    for (const token of [undefined, '', 'selected-account-token']) {
+      const env = childEnv(token);
+      const authKeys = Object.keys(env).filter(key => key.toUpperCase() === 'CODEBUDDY_AUTH_TOKEN');
+      assert.deepEqual(authKeys, token ? ['CODEBUDDY_AUTH_TOKEN'] : []);
+      assert.equal(env.CODEBUDDY_AUTH_TOKEN, token || undefined);
+    }
+    for (const key of keys) assert.equal(process.env[key], 'host-only-secret');
+  } finally {
+    for (const [index, key] of keys.entries()) {
+      if (originals[index] === undefined) delete process.env[key]; else process.env[key] = originals[index];
+    }
+  }
+});
+
 test('authToken reaches the CLI child environment via CODEBUDDY_AUTH_TOKEN', async t => {
+  const original = process.env.CODEBUDDY_AUTH_TOKEN;
+  process.env.CODEBUDDY_AUTH_TOKEN = 'inherited-host-token';
+  t.after(() => { if (original === undefined) delete process.env.CODEBUDDY_AUTH_TOKEN; else process.env.CODEBUDDY_AUTH_TOKEN = original; });
   const f = await fixture(t);
   const events = await collect(runCodeBuddy({ ...f, prompt: 'env', authToken: 'tok-123', timeoutMs: 5000 }));
   const last = events.at(-1), absentRun = await collect(runCodeBuddy({ ...f, prompt: 'env', timeoutMs: 5000 }));

@@ -194,7 +194,7 @@ test('safety and danger help are real hover and focus tooltips, dismissible with
   wrapper.props.onMouseEnter();
   tree = app.render(); tooltip = nodes(tree).find(node => node.props.role === 'tooltip')!;
   assert.match(content(tooltip), /默认关闭.*dangerously-skip-permissions.*不会隐式应用到独立委派/);
-  assert.match(content(tooltip), /不会自动批准/);
+  assert.match(content(tooltip), /单次允许选项.*不会选择永久授权/);
   wrapper.props.onMouseLeave(); assert.equal(nodes(app.render()).filter(node => node.props.role === 'tooltip').length, 0);
 });
 
@@ -412,6 +412,35 @@ test('run model metadata distinguishes bare requests from returned provider/name
     assert.equal(app.state[0].runs[0].returnedModel, returned ? id : undefined, JSON.stringify(id));
     const history = nodes(app.render()).find(node => node.props['aria-label'] === '运行记录')!;
     assert.ok(content(history).includes(`请求模型：${request ? id : 'unknown'}；返回模型：${returned ? id : '未知'}`));
+  }
+});
+
+test('initial status surfaces only the exact safe account-store repair diagnostic', async () => {
+  const safe = 'Cannot read CodeBuddy accounts; repair the account store before continuing';
+  for (const value of [{error:safe}, {error:safe + ' PRIVATE-TOKEN'}, {error:'PRIVATE-TOKEN'}, null]) {
+    const app = harness([{ok:false, status:400, value}]); app.render(); await settle();
+    const tree = app.render();
+    assert.match(content(tree), value?.error === safe ? /账户存储无法读取.*修复账户存储.*不会回退本机登录/ : /HTTP 400/);
+    assert.ok(button(tree, '重试加载'));
+    assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/);
+  }
+});
+
+test('model discovery diagnostics survive parsing and polling but arbitrary upstream prose is discarded', async () => {
+  const message = '中国区：官方模型配置需要有效授权。 国际区公开目录未能获取，可能需要国际区独立授权；当前候选不代表完整国际目录，未向国际域名发送中国区凭据。 模型候选未验证账户可用权限；实际调用仍受地区、账户权限与余额限制。';
+  const response = {...payload(), modelMessage:message};
+  const app = mounted([{value:response}, {value:response}, {value:{...payload(), modelMessage:''}}]);
+  app.render(); await settle();
+  assert.equal(app.state[0].modelMessage, message);
+  assert.ok(nodes(app.render()).some(node => node.props['aria-label'] === '模型发现说明' && content(node) === message));
+  control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+  app.tick(); await settle(); assert.ok(content(app.render()).includes(message));
+  app.tick(); await settle(); assert.ok(!content(app.render()).includes(message));
+  assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+  for (const modelMessage of ['PRIVATE-TOKEN', message + ' PRIVATE-TOKEN', 1, {}, null]) {
+    const invalid = mounted([{value:{...payload(), modelMessage}}]); invalid.render(); await settle();
+    assert.equal(invalid.state[0].modelMessage, '');
+    assert.doesNotMatch(JSON.stringify(invalid.state), /PRIVATE-/);
   }
 });
 

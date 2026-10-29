@@ -25,6 +25,67 @@ test('runtime settings validate defaults, environment, efforts and numeric bound
   }
 })
 
+test('panel updates preserve legacy administrator settings while internal metadata updates remain available', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-panel-boundary-'))
+  const path = join(dir, 'settings.json')
+  try {
+    const legacy = {tools:'Read', maxConcurrency:7, queueTimeoutMs:12345, stallWarnMs:800, modelContext:{hy3:262144}}
+    writeFileSync(path, JSON.stringify(legacy))
+    const store = new SettingsStore({}, path)
+    const before = readFileSync(path, 'utf8')
+    for (const [key, value] of Object.entries(legacy)) {
+      assert.throws(() => store.updateFromPanel({permissionMode:'plan', [key]:value}), /administrator-only/)
+      assert.equal(store.config.permissionMode, 'dontAsk')
+      assert.equal(readFileSync(path, 'utf8'), before)
+    }
+    store.updateFromPanel({permissionMode:'plan', executionMode:'bridge'})
+    for (const [key, value] of Object.entries(legacy)) assert.deepEqual((store.config as unknown as Record<string, unknown>)[key], value)
+    store.update({modelContext:{...store.config.modelContext, discovered:100000}})
+    assert.equal(new SettingsStore({}, path).config.modelContext.discovered, 100000)
+    assert.equal(Object.hasOwn(JSON.parse(readFileSync(path, 'utf8')), 'executionMode'), false)
+  } finally { rmSync(dir, {recursive:true, force:true}) }
+})
+
+test('model discovery still persists trusted context metadata after panel updates are restricted', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-discovery-settings-'))
+  const routes = new Map<string, Parameters<WebServerLike['register']>[0]['handler']>()
+  const store = new SettingsStore({modelContext:{existing:128000}}, join(dir,'settings.json'))
+  const message = '已获取中国区官方 CLI 目录。 模型候选未验证账户可用权限；实际调用仍受地区、账户权限与余额限制。'
+  const dispose = registerSettingsRoutes({register(route){routes.set(route.path,route.handler)}}, store, () => {}, undefined, undefined,
+    async () => ({models:[{id:'discovered',name:'Discovered',contextWindow:262144}],message}))
+  const server = createServer((req,res) => routes.get(req.url!)!(req,res))
+  await new Promise<void>(resolve => server.listen(0,'127.0.0.1',resolve))
+  const base = `http://127.0.0.1:${(server.address() as {port:number}).port}/plugins/codebuddy-link/`
+  try {
+    const response = await fetch(base+'models',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})
+    assert.equal(response.status,200)
+    assert.equal((await response.json() as {modelMessage:string}).modelMessage,message)
+    assert.deepEqual(new SettingsStore({}, store.path).config.modelContext,{existing:128000,discovered:262144})
+    assert.equal((await (await fetch(base+'status')).json() as {modelMessage:string}).modelMessage,message)
+  } finally {dispose();server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve()));rmSync(dir,{recursive:true,force:true})}
+})
+
+test('status relays only the fixed account-store repair diagnostic, never arbitrary snapshot failures', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-status-diagnostic-'))
+  const routes = new Map<string, Parameters<WebServerLike['register']>[0]['handler']>()
+  let message = 'Cannot read CodeBuddy accounts; repair the account store before continuing'
+  const dispose = registerSettingsRoutes({register(route){routes.set(route.path,route.handler)}}, new SettingsStore({},join(dir,'settings.json')), () => {}, undefined, {
+    status:async () => {throw new Error(message)}, start:async () => ({}), poll:async () => ({}), cancel:() => {}, cancelAll:() => {},
+  })
+  const server = createServer((req,res) => routes.get(req.url!)!(req,res))
+  await new Promise<void>(resolve => server.listen(0,'127.0.0.1',resolve))
+  const url = `http://127.0.0.1:${(server.address() as {port:number}).port}/plugins/codebuddy-link/status`
+  try {
+    const response = await fetch(url)
+    assert.equal(response.status, 400)
+    assert.deepEqual(await response.json(), {error:message})
+    message = 'PRIVATE-TOKEN C:\\PRIVATE-PATH'
+    const unknown = await fetch(url)
+    assert.equal(unknown.status, 400)
+    assert.doesNotMatch(await unknown.text(), /PRIVATE-/)
+  } finally {dispose();server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve()));rmSync(dir,{recursive:true,force:true})}
+})
+
 test('runtime settings persist atomically and invalid updates leave live and saved settings unchanged', () => {
   const dir = mkdtempSync(join(tmpdir(), 'cb-runtime-settings-'))
   try {
@@ -193,6 +254,9 @@ test('run snapshots expose only the latest five calls, independent of state or i
       assert.ok(body.runs.every(run => run.contextOverrideSent === false && run.reasoningConfirmed === false))
       assert.doesNotMatch(JSON.stringify(body), /PRIVATE-/)
     }
+    runs = Array.from({length:8}, (_, i) => ({...raw, id:`tie-${i}`, state:'completed', queuedAt:100}))
+    const tied = await (await fetch(url)).json() as {runs:Record<string, unknown>[]}
+    assert.deepEqual(tied.runs.map(run => run.id), ['tie-0','tie-1','tie-2','tie-3','tie-4'])
   } finally {dispose();server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve()));rmSync(dir,{recursive:true,force:true})}
 })
 
@@ -218,12 +282,18 @@ test('HTTP settings enforce method, same origin, JSON and publish refresh status
     assert.equal((await fetch(base+'/config')).status,405)
     assert.equal((await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json',origin:'https://evil.example'},body:'{}'})).status,403)
     assert.equal((await fetch(base+'/config',{method:'POST',body:'{}'})).status,415)
-    const saved = await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({models:['hy3'],permissionMode:'plan',reasoningEffort:'high',maxConcurrency:3,queueTimeoutMs:6000,stallWarnMs:0,executionMode:'bridge',dangerouslySkipPermissions:true})})
+    const saved = await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({models:['hy3'],permissionMode:'plan',reasoningEffort:'high',executionMode:'bridge',dangerouslySkipPermissions:true})})
     assert.equal(saved.status,200); assert.equal(changed,1)
     const settings = await saved.json() as {config:Record<string,unknown>}
     assert.equal(settings.config.executionMode,undefined); assert.equal(settings.config.dangerouslySkipPermissions,true)
-    assert.equal(settings.config.reasoningEffort,'high'); assert.equal(settings.config.maxConcurrency,3)
-    assert.equal(settings.config.queueTimeoutMs,6000); assert.equal(settings.config.stallWarnMs,0)
+    assert.equal(settings.config.reasoningEffort,'high'); assert.equal(settings.config.maxConcurrency,2)
+    assert.equal(settings.config.queueTimeoutMs,600000); assert.equal(settings.config.stallWarnMs,90000)
+    for (const patch of [{tools:'default'}, {maxConcurrency:3}, {queueTimeoutMs:6000}, {stallWarnMs:0}, {modelContext:{hy3:1}}]) {
+      const rejected = await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({permissionMode:'acceptEdits', ...patch})})
+      assert.equal(rejected.status,400)
+    }
+    const unchanged = await (await fetch(base+'/status')).json() as {config:Record<string,unknown>}
+    assert.equal(unchanged.config.permissionMode,'plan')
     assert.equal((await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:'{"queueTimeoutMs":2147483648}'})).status,400)
     assert.equal(changed,1)
     const refreshed = await fetch(base+'/refresh',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})

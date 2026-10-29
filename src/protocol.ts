@@ -135,13 +135,13 @@ export class CodeBuddyProtocol {
    * When the API call fails, the CLI relays the status line (e.g. "401
    * Unauthorized") as the entire assistant message. In --json-schema mode the
    * CLI then never emits a result row and never exits, so the request would
-   * hang until the timeout. A bare HTTP status line is never legitimate model
-   * output: fail fast instead of streaming it as text.
+   * hang until the timeout. Retain this status-line fail-fast heuristic only
+   * with a reason phrase; a numeric answer alone is ordinary model output.
    */
   private rejectEchoedHttpError(blocks: RecordValue[]): void {
     if (blocks.length !== 1 || blocks[0]!.type !== 'text') return;
     const message = text(blocks[0]!.text).trim();
-    if (message.length > 80 || !/^[45]\d{2}( [A-Za-z .,'/-]+)?$/.test(message)) return;
+    if (message.length > 80 || !/^[45]\d{2} [A-Za-z][A-Za-z .,'/-]*$/.test(message)) return;
     throw new Error(/401|unauth/i.test(message)
       ? 'CodeBuddy request failed (authentication required): 在终端运行 codebuddy login 后重试'
       : `CodeBuddy request failed: ${message}`);

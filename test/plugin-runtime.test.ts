@@ -53,7 +53,7 @@ else { send({type:'result',subtype:'success',result:JSON.stringify(process.argv.
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   t.after(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(home, {recursive:true,force:true}) })
   const base = `http://127.0.0.1:${(server.address() as {port:number}).port}/plugins/codebuddy-link/`
-  const update = async (patch: unknown) => { const res = await fetch(base+'config', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(patch)}); assert.equal(res.status,200); return res.json() }
+  const update = async (patch: unknown, expectedStatus = 200) => { const res = await fetch(base+'config', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(patch)}); assert.equal(res.status,expectedStatus); return res.json() }
   const runs = (): RunSnapshot[] => JSON.parse(command.handler({rawInput:'runs'}).text)
   const ask = (prompt: string, extra: Record<string, unknown> = {}, signal?: AbortSignal): Promise<string> => tool.execute({prompt,...extra}, {signal})
   const model = async (extra: Partial<GenerateOptions> = {}, onText = () => {}) => {
@@ -86,7 +86,7 @@ test('provider always runs ACP; housekeeping and ask stay restricted print', asy
 function effort(args: string[]): string | undefined { const at = args.indexOf('--effort'); return at < 0 ? undefined : args[at+1] }
 
 test('actual provider and ask argv share effort inheritance, override and explicit auto', async t => {
-  const f = await fixture(t)
+  const f = await fixture(t, {queueTimeoutMs:60000})
   for (const [setting, expected] of [[undefined,'high'],['low','low'],['auto',undefined]] as const) {
     const extra = setting === undefined ? {} : {reasoningEffort:setting as ReasoningEffortId}
     assert.equal(effort(JSON.parse((await f.model(extra)).text)), expected)
@@ -95,12 +95,14 @@ test('actual provider and ask argv share effort inheritance, override and explic
   const count = f.runs().length
   await assert.rejects(f.ask('ARGV',{reasoningEffort:'invalid'}),/Unsupported reasoning effort/)
   assert.equal(f.runs().length,count)
-  await f.update({reasoningEffort:'max',queueTimeoutMs:60000})
+  await f.update({reasoningEffort:'max'})
   assert.equal(f.tool.timeoutMs,135000, 'host envelope covers both account and global queue budgets')
   assert.equal(effort(JSON.parse(await f.ask('ARGV'))),'max')
   assert.equal(effort(JSON.parse((await f.model()).text)),'max')
-  await f.update({queueTimeoutMs:2147483647})
-  assert.equal(f.tool.timeoutMs,2147483647)
+  await f.update({queueTimeoutMs:2147483647},400)
+  assert.equal(f.tool.timeoutMs,135000, 'HTTP settings cannot change administrator queue budgets')
+  const maximum = await fixture(t,{queueTimeoutMs:2147483647})
+  assert.equal(maximum.tool.timeoutMs,2147483647)
 })
 
 test('registered provider and ask share queue; queued abort and active abort hand off slot', async t => {
@@ -121,7 +123,7 @@ test('registered provider and ask share queue; queued abort and active abort han
   } finally {stop.abort(); await running}
 })
 
-test('saving higher concurrency immediately wakes queued calls without interrupting active call', async t => {
+test('panel cannot raise administrator concurrency or interrupt active and queued calls', async t => {
   const f = await fixture(t), started = deferred(), stop = new AbortController()
   const running = f.model({messages:[{id:'m1' as Message['id'],source:{kind:'user'},role:'user',content:[{type:'text',text:'HOLD'}]}],signal:stop.signal}, started.resolve)
   try {
@@ -129,9 +131,11 @@ test('saving higher concurrency immediately wakes queued calls without interrupt
     const waiting = f.ask('ARGV')
     for (let i=0; i<100 && f.runs().length < 2; i++) await new Promise(resolve => setImmediate(resolve))
     assert.equal(f.runs()[0]!.state,'queued')
-    await f.update({maxConcurrency:2,stallWarnMs:0})
-    assert.ok(JSON.parse(await waiting).includes('--print'))
+    await f.update({maxConcurrency:2,stallWarnMs:0},400)
+    assert.equal(f.runs()[0]!.state,'queued')
     assert.equal(f.runs().find(run => run.source==='model')?.state,'responding')
+    stop.abort(); await running
+    assert.ok(JSON.parse(await waiting).includes('--print'))
   } finally {stop.abort(); await running}
 })
 

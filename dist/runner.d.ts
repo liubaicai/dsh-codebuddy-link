@@ -20,7 +20,7 @@ export interface CodeBuddyRequest {
     timeoutMs?: number;
     signal?: AbortSignal;
     jsonSchema?: Record<string, unknown>;
-    /** Bearer token forwarded as CODEBUDY_AUTH_TOKEN; overrides the CLI's own stored login. */
+    /** Bearer token forwarded as CODEBUDDY_AUTH_TOKEN; overrides the CLI's own stored login. */
     authToken?: string;
 }
 /** Resolve npm's Windows launchers without ever invoking cmd.exe or PowerShell. */
