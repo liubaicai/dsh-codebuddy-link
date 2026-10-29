@@ -4,7 +4,6 @@ import { CodeBuddyAdapter } from "./adapter.js";
 import { CODEBUDDY_EFFORTS, resolveConfig } from "./config.js";
 import { resolveEffort } from "./effort.js";
 import { CallRuntime } from "./runtime.js";
-import { runCodeBuddy } from "./runner.js";
 import { SettingsStore } from "./settings.js";
 import { registerSettingsRoutes } from "./web.js";
 import { AccountStore, AccountAuthManager } from "./accounts.js";
@@ -42,7 +41,7 @@ export function apply(ctx, entry = {}) {
                 return { kind: 'success', text: JSON.stringify(runtime.snapshots(), null, 2) };
             if (command === 'status')
                 return { kind: 'success', text: [
-                        '**CodeBuddy bridge**', `Enabled: ${config.enabled}`, `CLI: ${config.codebuddyBin || 'codebuddy (PATH)'}`,
+                        '**CodeBuddy bridge**', ...(store.loadError ? [store.loadError] : []), `Enabled: ${config.enabled}`, `CLI: ${config.codebuddyBin || 'codebuddy (PATH)'}`,
                         `Model: ${config.defaultModel}`, `Default effort: ${config.reasoningEffort} (server reasoning unconfirmed)`,
                         `Concurrency: ${config.maxConcurrency}; queue timeout: ${config.queueTimeoutMs}ms; no-progress warning: ${config.stallWarnMs}ms`,
                         'Execution mode: autonomous (ACP stdio, fixed)',

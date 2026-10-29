@@ -17,21 +17,34 @@ export class SettingsStore {
     saved;
     entry;
     path;
+    /** A diagnostic-only configuration keeps recovery routes available, never execution. */
+    loadError;
     constructor(entry = {}, path = settingsPath()) {
         this.entry = entry;
         this.path = path;
-        let saved = {};
+        this.saved = {};
         try {
-            saved = JSON.parse(readFileSync(path, 'utf8'));
+            let saved = {};
+            try {
+                saved = JSON.parse(readFileSync(path, 'utf8'));
+            }
+            catch (error) {
+                if (error.code !== 'ENOENT')
+                    throw error;
+            }
+            this.saved = withoutRetired(validateKeys(saved));
+            this.config = resolveConfig({ ...entry, ...this.saved });
         }
-        catch (error) {
-            if (error.code !== 'ENOENT')
-                throw new Error('Cannot read CodeBuddy settings; repair or remove the plugin settings file');
+        catch {
+            // Do not overwrite, silently discard unknown keys, or execute using fallback
+            // permissions. A restart after external repair is the explicit recovery step.
+            this.loadError = 'CodeBuddy settings could not be loaded. Provider and delegation are disabled. Repair the plugin settings.json file and restart DSH; the original file has not been changed.';
+            this.config = resolveConfig({ enabled: false, askTool: false, permissionMode: 'dontAsk', tools: '', dangerouslySkipPermissions: false }, {});
         }
-        this.saved = withoutRetired(validateKeys(saved));
-        this.config = resolveConfig({ ...entry, ...this.saved });
     }
     update(patch) {
+        if (this.loadError)
+            throw new Error(this.loadError);
         const updates = withoutRetired(validateKeys(patch));
         const saved = { ...this.saved, ...updates };
         const next = resolveConfig({ ...this.entry, ...saved });

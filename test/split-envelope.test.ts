@@ -94,7 +94,8 @@ test('fixed ACP leaves broken suffix documents opaque in both result and stream 
     const out = await replay(text, resultOnly)
     assert.equal(out.filter(c => c.type === 'tool-call-delta' || c.type === 'block-start' && c.blockType === 'tool-call').length, 0)
     assert.deepEqual(out.filter(c => c.type === 'text-delta').map(c => c.text), [text])
-    assert.equal(out.filter(c => c.type === 'reasoning-delta').map(c => c.text).join(''), resultOnly ? '' : text)
+    const preview = resultOnly ? '' : text.length > 1024 ? text.slice(0,1024) + '\n[CodeBuddy 正在生成，完整内容将在完成后显示]\n' : text
+    assert.equal(out.filter(c => c.type === 'reasoning-delta').map(c => c.text).join(''), preview)
     assert.equal(out.filter(c => c.type === 'finish').length, 1)
     assert.equal(out.filter(c => c.type === 'usage').length, 1)
     const finish = out.at(-1)

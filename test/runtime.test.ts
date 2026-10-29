@@ -10,6 +10,23 @@ const request = { prompt: 'SECRET-PROMPT', cwd: 'SECRET-PATH', authToken: 'SECRE
 async function collect(events: AsyncIterable<BridgeEvent>) { const result = []; for await (const event of events) result.push(event); return result }
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done }); return { promise, resolve } }
 
+test('bounded request model IDs retain their identity and configured context', async () => {
+  for (const length of [128,129,256]) {
+    const model = 'm'.repeat(length)
+    const runtime = new CallRuntime(resolveConfig({models:[model],modelContext:{[model]:333333}}, {}))
+    await collect(runtime.run({...request,model}, 'model', async function* () {yield {type:'result',text:'ok'}}))
+    assert.equal(runtime.snapshots()[0]!.requestedModel,model)
+    assert.equal(runtime.snapshots()[0]!.contextWindow,333333)
+    assert.equal(runtime.snapshots()[0]!.contextSource,'model')
+  }
+  const runtime = new CallRuntime(resolveConfig({}, {}))
+  let calls = 0
+  for (const model of ['m'.repeat(257),'provider/name','https://host/model','../model','model\n']) {
+    await assert.rejects(collect(runtime.run({...request,model}, 'model', async function* () {calls++;yield {type:'result',text:'ok'}})), /model id/)
+  }
+  assert.equal(calls,0); assert.deepEqual(runtime.snapshots(),[])
+})
+
 test('shared FIFO bounds both call paths and records sanitized metadata', async () => {
   const cfg = resolveConfig({ maxConcurrency: 1, modelContext: { hy3: 262144 } }, {})
   const runtime = new CallRuntime(cfg), gate = deferred(), started = deferred(), order: string[] = []

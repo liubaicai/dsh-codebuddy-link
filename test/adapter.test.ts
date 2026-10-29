@@ -86,6 +86,36 @@ test('ordinary calls use native tools and show progress as reasoning before the 
   assertNoReplay(out)
 })
 
+test('long native answers retain a bounded progress preview and an intact final result', async () => {
+  const text = 'x'.repeat(1023) + '😀' + '正文'.repeat(2000)
+  const runner: Runner = async function* () {
+    yield {type:'text',delta:text}
+    yield {type:'tool-start',id:'t',name:'Read'}
+    yield {type:'text',delta:'end'}
+    yield {type:'result',text:text+'end'}
+  }
+  const out = await collect(new CodeBuddyAdapter(providerConfig(),runner).stream(options))
+  const progress = out.filter(c => c.type === 'reasoning-delta').map(c => c.text).join('')
+  assert.ok(progress.length < 1200)
+  assert.equal(progress.split('完整内容将在完成后显示').length,2)
+  assert.match(progress,/CodeBuddy 执行: Read/)
+  assert.ok(!progress.includes('\uD83D'))
+  assert.deepEqual(out.filter(c => c.type === 'text-delta').map(c => c.text),[text+'end'])
+  assertNoReplay(out)
+})
+
+test('preview cap never leaves a high surrogate when a pair crosses event boundaries', async () => {
+  const runner: Runner = async function* () {
+    yield {type:'text',delta:'x'.repeat(1023)+'\uD83D'}
+    yield {type:'text',delta:'\uDE00tail'}
+    yield {type:'result',text:''}
+  }
+  const out = await collect(new CodeBuddyAdapter(providerConfig(),runner).stream(options))
+  const preview = out.filter(c => c.type === 'reasoning-delta').map(c => c.text).join('')
+  assert.ok(!preview.includes('\uD83D') && !preview.includes('\uDE00'))
+  assert.deepEqual(out.filter(c => c.type === 'text-delta').map(c => c.text),['x'.repeat(1023)+'😀tail'])
+})
+
 test('ordinary calls never parse or replay DSH envelopes, even with available host tools', async () => {
   const envelopes = [
     '{"text":"checking","toolCalls":[{"name":"read","arguments":"{\\"path\\":\\"a\\"}"}]}',

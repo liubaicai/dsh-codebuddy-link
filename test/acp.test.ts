@@ -35,7 +35,7 @@ input.on('line', line => {
  }
  if (row.method !== 'session/prompt') return;
  mode = row.params.prompt[0].text;
- if (mode === 'error') return send({jsonrpc:'2.0',id:row.id,error:{code:-32603,message:'SECRET_TOKEN https://private.invalid',data:{token:'SECRET_TOKEN'}}});
+ if (mode === 'error' || mode === 'auth') return send({jsonrpc:'2.0',id:row.id,error:{code:mode==='auth'?-32000:-32603,message:'SECRET_TOKEN https://private.invalid',data:{token:'SECRET_TOKEN'}}});
  if (mode === 'malformed') return process.stdout.write('SECRET_TOKEN not json\n');
  if (mode === 'oversized') return process.stdout.write('x'.repeat(8*1024*1024+1));
  if (mode === 'exit') {process.stderr.write('SECRET_TOKEN'); return process.exit(4);}
@@ -43,6 +43,34 @@ input.on('line', line => {
  if (mode === 'eof') return process.stdout.end();
  if (mode === 'bad-version') return send({jsonrpc:'1.0',id:row.id,result:{stopReason:'end_turn'}});
  if (mode === 'bad-id') return reply(99,{stopReason:'end_turn'});
+ if (mode.startsWith('trailing:')) {
+  const [,kind,grouping] = mode.split(':');
+  const metadata = [
+   {sessionUpdate:'session_info_update',title:'done',updatedAt:null},
+   {sessionUpdate:'current_mode_update',currentModeId:'default'},
+   {sessionUpdate:'config_option_update',configOptions:[{id:'model',name:'Model',type:'select',currentValue:'x',options:[{value:'x',name:'X'}]}]},
+   {sessionUpdate:'available_commands_update',availableCommands:[{name:'help',description:'Help',input:{hint:'topic'}}]},
+   {sessionUpdate:'usage_update',used:900,size:1000,_meta:{'codebuddy.ai/messageId':'billed',usage:{prompt_tokens:10,completion_tokens:5,prompt_cache_hit_tokens:2,prompt_cache_write_tokens:0},'codebuddy.ai/requestCredits':{r:0.25}}},
+  ];
+  const invalid = {
+   text:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'SECRET_TOKEN'}},
+   thought:{sessionUpdate:'agent_thought_chunk',content:{type:'text',text:'SECRET_TOKEN'}},
+   tool:{sessionUpdate:'tool_call',toolCallId:'late',status:'pending',rawInput:{command:'never execute'}},
+   unknown:{sessionUpdate:'future_unverified_update'},
+   shape:{sessionUpdate:'session_info_update',title:{secret:'SECRET_TOKEN'}},
+   config:{sessionUpdate:'config_option_update',configOptions:[{}]},
+   commands:{sessionUpdate:'available_commands_update',availableCommands:[{}]},
+   usage:{sessionUpdate:'usage_update',used:'SECRET_TOKEN',size:1000},
+  };
+  const result={jsonrpc:'2.0',id:row.id,result:{stopReason:'end_turn'}};
+  const tail = kind==='duplicate' ? [result] : kind==='request' ? [{jsonrpc:'2.0',id:'late-request',method:'terminal/create',params:{command:'never execute'}}] :
+   (invalid[kind]?[invalid[kind]]:metadata).map(update=>({jsonrpc:'2.0',method:'session/update',params:{sessionId:kind==='wrong-id'?'wrong-session':'fresh-session',update}}));
+  text('answer');
+  const frame = value => JSON.stringify(value)+'\n';
+  if(grouping==='split') {setTimeout(()=>process.stdout.write(frame(result)),10);setTimeout(()=>process.stdout.write(tail.map(frame).join('')),30);}
+  else process.stdout.write([result,...tail].map(frame).join(''));
+  return;
+ }
  if (mode === 'late-update') return process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:row.id,result:{stopReason:'end_turn'}})+'\n'+JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:'fresh-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'must not stream after end_turn'}}}})+'\n');
  if (mode === 'duplicate') {const result=JSON.stringify({jsonrpc:'2.0',id:row.id,result:{stopReason:'end_turn'}})+'\n'; return process.stdout.write(result+result);}
  if (mode === 'both') return send({jsonrpc:'2.0',id:row.id,result:{stopReason:'end_turn'},error:{code:0,message:'SECRET_TOKEN'}});
@@ -60,11 +88,19 @@ input.on('line', line => {
  if (mode === 'argv') {text(JSON.stringify(process.argv.slice(2))); return reply(row.id,{stopReason:'end_turn'});}
  if (mode === 'env') {text(process.env.CODEBUDDY_AUTH_TOKEN ?? 'ABSENT'); return reply(row.id,{stopReason:'end_turn'});}
  if(mode === 'messages') {
-  update({sessionUpdate:'agent_message_chunk',messageId:'a',content:{type:'text',text:'intermediate'}});
-  update({sessionUpdate:'agent_message_chunk',messageId:'b',content:{type:'text',text:'final'}});
-  update({sessionUpdate:'agent_message_chunk',messageId:'b',content:{type:'text',text:' answer'}});
+  text('ID-less prefix. ');
+  update({sessionUpdate:'agent_message_chunk',messageId:'a',content:{type:'text',text:'First substantive finding. '}});
+  update({sessionUpdate:'agent_message_chunk',_meta:{'codebuddy.ai/messageId':'b'},content:{type:'text',text:'Second'}});
+  update({sessionUpdate:'agent_message_chunk',messageId:'b',content:{type:'text',text:' finding. '}});
+  update({sessionUpdate:'agent_message_chunk',messageId:'a',content:{type:'text',text:'More first. '}});
+  text('{"tool_calls":[{"name":"never_replay"}]}');
   return reply(row.id,{stopReason:'end_turn'});
  }
+ if(mode === 'success-tree') {
+  const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore',detached:process.platform==='win32'});
+  writeFileSync('child.pid',String(child.pid));text('done');return reply(row.id,{stopReason:'end_turn'});
+ }
+ if(mode === 'idle')return;
  update({sessionUpdate:'agent_thought_chunk',content:{type:'text',text:'thinking'}});
  update({sessionUpdate:'tool_call',toolCallId:'native-1',title:'Read',kind:'read',status:'pending',rawInput:{path:'a'}});
  update({sessionUpdate:'tool_call_update',toolCallId:'native-1',status:'in_progress'});
@@ -124,10 +160,83 @@ test('ACP v1 initializes with no host capabilities, creates fresh session, sends
   await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));
 });
 
-test('ACP final text selects last message while streaming all progress', async t => {
+test('ACP preserves every message part and ID-less prefix without inventing finality or replaying opaque text', async t => {
  const f=await fixture(t);const events=await collect(runCodeBuddyAcp({...f,prompt:'messages'}));
- assert.deepEqual(events.flatMap(e=>e.type==='text'?[e.delta]:[]),['intermediate','final',' answer']);
- assert.deepEqual(events.at(-1),{type:'result',sessionId:'fresh-session',text:'final answer'});
+ const parts=['ID-less prefix. ','First substantive finding. ','Second',' finding. ','More first. ','{"tool_calls":[{"name":"never_replay"}]}'];
+ assert.deepEqual(events.flatMap(e=>e.type==='text'?[e.delta]:[]),parts);
+ assert.deepEqual(events.at(-1),{type:'result',sessionId:'fresh-session',text:parts.join('')});
+ assert.equal(events.some(e=>e.type==='tool-start'||e.type==='tool-end'),false);
+ assert.deepEqual((await wire(f.cwd)).map(row=>row.method),['initialize','session/new','session/prompt']);
+});
+
+test('post-result session metadata and billing are accepted together or across stdout reads', {timeout:30000}, async t => {
+ for(const grouping of ['joined','split']) {
+  const f=await fixture(t);const events:BridgeEvent[]=[];
+  for await(const event of runCodeBuddyAcp({...f,prompt:`trailing:valid:${grouping}`})) {
+   events.push(event);
+   // POSIX cleanup is synchronous; hold a text yield so split frames are read
+   // before the completion boundary. Windows also covers reads during capture.
+   if(grouping==='split' && process.platform!=='win32' && event.type==='text')await delay(100);
+  }
+  assert.deepEqual(events,[{type:'text',delta:'answer'},{type:'usage',input:10,output:5,cacheRead:2,cacheWrite:0},{type:'metadata',totalCredits:0.25},{type:'result',sessionId:'fresh-session',text:'answer'}]);
+ }
+});
+
+test('post-result text, execution, unknown updates, wrong sessions, bad metadata and duplicate RPC fail closed', {timeout:90000}, async t => {
+ for(const kind of ['text','thought','tool','unknown','wrong-id','shape','config','commands','usage','duplicate','request']) {
+  for(const grouping of ['joined',...(process.platform==='win32'?['split']:[])]) {
+   const f=await fixture(t);const events:BridgeEvent[]=[];
+   await assert.rejects(async()=>{for await(const event of runCodeBuddyAcp({...f,prompt:`trailing:${kind}:${grouping}`}))events.push(event);},error=>error instanceof Error && !error.message.includes('SECRET_TOKEN'),`${kind}:${grouping}`);
+   assert.equal(events.some(e=>e.type==='result'||e.type==='tool-start'),false);
+   assert.equal((await wire(f.cwd)).some(row=>row.id==='late-request'),false);
+  }
+ }
+});
+
+test('successful completion still captures and kills native descendants', {timeout:20000}, async t => {
+ const f=await fixture(t);const events=await collect(runCodeBuddyAcp({...f,prompt:'success-tree'}));
+ assert.deepEqual(events.at(-1),{type:'result',sessionId:'fresh-session',text:'done'});
+ await dead(Number(await readFile(join(f.cwd,'child.pid'),'utf8')));
+ await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
+});
+
+test('cleanup capture failure preserves primary auth, abort, timeout and protocol errors, but rejects success', {skip:process.platform!=='win32',timeout:30000}, async t => {
+ const original=process.env.SystemRoot;
+ const restore=()=>{if(original===undefined)delete process.env.SystemRoot;else process.env.SystemRoot=original;};
+ const onSpawn=()=>{process.env.SystemRoot='Z:\\missing-SECRET_TOKEN-private-root';};
+ try {
+  for(const [prompt,name,pattern] of [
+   ['auth','CodeBuddyAuthError',/requires authorization/],
+   ['error','Error',/server error details omitted/],
+   ['malformed','Error',/Invalid or oversized/],
+   ['idle','TimeoutError',/timed out/],
+   ['env','Error',/descendant capture failed/],
+  ] as const) {
+   restore();
+   const f=await fixture(t);const events:BridgeEvent[]=[];
+   await assert.rejects(async()=>{for await(const event of runCodeBuddyAcp({...f,prompt,onSpawn,timeoutMs:prompt==='idle'?1000:10000}))events.push(event);},error=>{
+    assert.ok(error instanceof Error);assert.equal(error.name,name,error.message);assert.match(error.message,pattern);
+    assert.doesNotMatch(error.message,/SECRET_TOKEN|private-root|private\.invalid/);
+    if(prompt!=='env') {
+     assert.match(error.message,/secondary cleanup failure: CodeBuddy ACP descendant capture failed/);
+     assert.equal((error as Error & {cleanupError?:Error}).cleanupError?.message,'CodeBuddy ACP descendant capture failed; cleanup could not be verified');
+    }
+    return true;
+   });
+   assert.equal(events.some(e=>e.type==='result'),false);
+   await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
+  }
+  restore();
+  const f=await fixture(t);const controller=new AbortController();
+  const outcome=collect(runCodeBuddyAcp({...f,prompt:'idle',onSpawn,signal:controller.signal})).catch(error=>error);
+  await waitFile(join(f.cwd,'server.pid'));controller.abort();
+  const error=await outcome;
+  assert.equal(error.name,'AbortError');assert.match(error.message,/request aborted; secondary cleanup failure/);
+  assert.doesNotMatch(error.message,/SECRET_TOKEN|private-root/);
+  await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
+ } finally {
+  if(original===undefined)delete process.env.SystemRoot;else process.env.SystemRoot=original;
+ }
 });
 
 test('ACP argv uses stdio native default tools and optional literal values without permission conflicts', async t => {

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { isModelIdentifier as identifier } from "./metadata.js";
+import { isRequestModelIdentifier } from "./model-id.js";
 import { isCodeBuddyEffort } from "./config.js";
 import { runCodeBuddy } from "./runner.js";
 const terminal = (state) => ['completed', 'failed', 'cancelled'].includes(state);
@@ -68,7 +69,9 @@ export class CallRuntime {
         });
     }
     async *run(request, source, runner = runCodeBuddy, validate) {
-        const requestedModel = identifier(request.model) ? request.model : 'default';
+        if (request.model !== undefined && !isRequestModelIdentifier(request.model))
+            throw new Error('Invalid CodeBuddy request model id');
+        const requestedModel = request.model ?? 'default';
         const modelContext = requestedModel !== 'default' ? this.config.modelContext[requestedModel] : undefined;
         const record = {
             id: randomUUID(), source, state: 'queued', requestedModel,

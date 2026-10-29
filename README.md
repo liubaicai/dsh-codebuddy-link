@@ -28,7 +28,7 @@ npm install -g @tencent-ai/codebuddy-code
 需要本机安装 Git。公开仓库使用 HTTPS，不要求 SSH 密钥。将 `web` 替换成实际使用的 DSH profile：
 
 ```sh
-dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.21"
+dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.22"
 ```
 
 仓库**包含已构建的 dist**，安装不依赖 TypeScript、开发依赖或安装时构建脚本。CI 会重新构建并检查提交的产物，避免源码与产物不一致。
@@ -44,10 +44,10 @@ dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-lin
 从 [Releases](https://github.com/liubaicai/dsh-codebuddy-link/releases) 下载对应版本 `.tgz`，可使用同页 `SHA256SUMS.txt` 核对 SHA-256。进入下载目录后执行：
 
 ```powershell
-dsh plugin --profile web add .\dsh-codebuddy-link-0.3.21.tgz
+dsh plugin --profile web add .\dsh-codebuddy-link-0.3.22.tgz
 ```
 
-macOS/Linux 使用 `./dsh-codebuddy-link-0.3.21.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
+macOS/Linux 使用 `./dsh-codebuddy-link-0.3.22.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
 
 ### 4. 启用与升级
 
@@ -66,7 +66,7 @@ GitHub 安装或 Actions 不会读取你的 CodeBuddy 凭据；模型请求只�
 - 默认模型用于未显式指定模型的调用（如 `codebuddy_ask`）；不会覆盖会话中明确选择的模型。`default` 特指 CLI 自己的默认模型。
 - Provider 固定通过 ACP stdio 原生执行：设置页不再提供执行模式开关。可单独勾选 `--dangerously-skip-permissions`；无论是否勾选，ACP 原生工具都会绕过 DSH 沙箱和逐项确认，仅用于可信任务。
 - `dontAsk` / `plan` / `acceptEdits` 对独立委派及未启用权限跳过的 ACP CLI 生效。
-- 设置持久化在 `${DSH_HOME}/plugins/dsh-codebuddy-link/settings.json`（默认 `~/.dsh/...`）。面板只保存非敏感的模型和委派设置，不保存凭据。
+- 设置持久化在 `${DSH_HOME}/plugins/dsh-codebuddy-link/settings.json`（默认 `~/.dsh/...`）。面板只保存非敏感的模型和委派设置，不保存凭据。若文件损坏、包含未知键或配置无效，插件保留原文件，禁用模型调用与独立委派，但保留面板和状态诊断；请备份并修复该文件或管理员配置后重启 DSH。不会静默改用默认权限执行，也不允许从面板覆盖损坏文件。
 
 ### 共享积分（实验性，只读）
 
@@ -158,7 +158,7 @@ Provider 主调用不需要任何开关，始终通过 ACP stdio 原生执行。
 dangerouslySkipPermissions: true
 ```
 
-ACP provider 通过 **ACP stdio**（`--acp --acp-transport stdio --tools default`）接入，使用 JSON-RPC `initialize → session/new → session/prompt`，从 `session/update` 获取原生执行事件；不使用 print 文本流作为 provider 传输，也不会失败后自动回退并重复执行任务。保留 CLI 原生系统提示并追加任务上下文，不发送 DSH 工具 schemas 或要求模型手写调用协议。CLI 自行解析、执行原生工具；插件接收进度、最终文本和错误，绝不把 CLI 已执行的操作重新发给 DSH。ACP 的上下文窗口 `usage_update.used/size` 不能当作计费 token；仅识别 CodeBuddy 扩展中明确的逐消息 token 计数和累计请求积分，按消息/请求 ID 去重。没有完整可靠字段时保持未知，不伪造为 0。过程显示在思考/进度区，完整最终结果单独显示；即使最终文本像 JSON/DSML 也不再解析为 DSH 调用。标题/压缩等带 `purpose` 的后台请求始终关闭原生工具及权限跳过。每轮仍使用新 CLI 进程、新 ACP session 和 DSH 历史，不复用 ACP session/load，避免分叉、重试、压缩时两套历史失配。进程 cwd 与 session/new.cwd 同时绑定会话工作目录。取消时先记录 Windows 子进程身份，再发 session/cancel，以有界等待回收进程树并核对已记录的子进程；无法确认清理成功时报错。CLI 内部逐项工具结果不回传为下一轮历史，重要结论应写入最终回答。
+ACP provider 通过 **ACP stdio**（`--acp --acp-transport stdio --tools default`）接入，使用 JSON-RPC `initialize → session/new → session/prompt`，从 `session/update` 获取原生执行事件；不使用 print 文本流作为 provider 传输，也不会失败后自动回退并重复执行任务。保留 CLI 原生系统提示并追加任务上下文，不发送 DSH 工具 schemas 或要求模型手写调用协议。CLI 自行解析、执行原生工具；插件接收进度、最终文本和错误，绝不把 CLI 已执行的操作重新发给 DSH。ACP 的上下文窗口 `usage_update.used/size` 不能当作计费 token；仅识别 CodeBuddy 扩展中明确的逐消息 token 计数和累计请求积分，按消息/请求 ID 去重。没有完整可靠字段时保持未知，不伪造为 0。工具状态、思考及最多 1024 个 UTF-16 单位的正文预览显示在思考/进度区，完整文本在成功完成并清理进程后单独显示；消息 ID 变化不会丢弃此前正文，不以 ID 猜测“最终答案”；即使最终文本像 JSON/DSML 也不再解析为 DSH 调用。标题/压缩等带 `purpose` 的后台请求始终关闭原生工具及权限跳过。每轮仍使用新 CLI 进程、新 ACP session 和 DSH 历史，不复用 ACP session/load，避免分叉、重试、压缩时两套历史失配。进程 cwd 与 session/new.cwd 同时绑定会话工作目录。取消时先记录 Windows 子进程身份，再发 session/cancel，以有界等待回收进程树并核对已记录的子进程；无法确认清理成功时报错。CLI 内部逐项工具结果不回传为下一轮历史，重要结论应写入最终回答。
 
 启用权限跳过时只传 `--dangerously-skip-permissions`，不同时传冲突的 `--permission-mode dontAsk`。**CodeBuddy 2.177.1 的帮助明确提示 HIGH/CRITICAL 操作仍可能要求确认**；插件不会另外注入 `CODEBUDDY_IS_SANDBOX=1` 来扩大该授权。ACP 若仍发出 `session/request_permission`，客户端返回取消并报错，不自动批准残余高风险请求。客户端不声明文件/终端代理能力，读写与命令由 CLI 原生执行；未知客户端方法返回 method-not-found。非交互调用如被 CLI 安全策略拦截，会报错而不是伪造成功。工作目录不是隔离边界；此模式允许 CLI 以当前系统用户权限访问文件和运行命令，不经过 DSH 文件沙箱或逐项工具确认。取消/超时可以终止进程，但无法撤销已完成的写入或外部操作。仅用于可信任务。
 
@@ -168,7 +168,7 @@ ACP provider 通过 **ACP stdio**（`--acp --acp-transport stdio --tools default
 
 旧版 provider 的 **DSH 工具桥接模式**（NDJSON 工具协议、统一回复归一化器及解析失败诊断）已随固定 ACP 模式移除，不再作为 provider 失败面存在。`codebuddy_ask` 默认同样关闭 CLI 工具。如果管理员显式启用 `tools`，CLI 工具会在独立进程中执行，**不受 DSH 文件沙箱约束，也没有逐项 DSH 工具卡片或确认界面**。不要在不可信任务中启用；不要使用该设置绕过 DSH 的权限限制。启用工具时必须能解析到 session 工作目录，或显式配置 `workspaceRoot`。provider 的权限跳过开关不会隐式赋予 `codebuddy_ask` 权限。
 
-CLI 会自行加载其用户配置、工作目录规则等；插件并非隔离运行 CodeBuddy 的沙箱。发送给 CLI 的对话和工具描述将按 CodeBuddy 服务及账户策略处理。
+CLI 会自行加载其用户配置、工作目录规则等；插件并非隔离运行 CodeBuddy 的沙箱。**原生工具可能读取认证信息**：如果 CLI 未清理派生进程环境，工具命令可以继承 `CODEBUDDY_AUTH_TOKEN`；同一系统用户还可能读取插件及 CLI 的凭据文件。通过环境注入避免了命令行泄露，但不构成工具与凭据之间的隔离。不要让不可信任务在持有真实凭据的用户环境中执行。发送给 CLI 的对话和工具描述将按 CodeBuddy 服务及账户策略处理。
 
 模型发现会额外匿名请求公共注册表 `https://models.dev/api.json`（`credentials: 'omit'`，不携带任何登录、cookie 或 CodeBuddy 凭据）以获取各模型的上下文窗口；请求失败或离线时使用内置快照，不影响模型发现本身。如需完全离线，可在防火墙拦截该域名，窗口将回退到内置快照与 `contextWindow` 配置。
 

@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
 import { AcpUsage } from "./acp-usage.js";
+import { isSessionMetadata } from "./acp-messages.js";
 import { captureAcpDescendants } from "./acp-cleanup.js";
 import { isModelIdentifier } from "./metadata.js";
+import { isRequestModelIdentifier } from "./model-id.js";
 import { NdjsonDecoder } from "./protocol.js";
 import { childEnv, killTree, resolveCodeBuddyBin } from "./runner.js";
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -32,6 +34,8 @@ export async function* runCodeBuddyAcp(request) {
         throw new TypeError('dangerouslySkipPermissions must be boolean');
     if (request.jsonSchema !== undefined)
         throw new TypeError('JSON schema output is not supported by CodeBuddy ACP');
+    if (request.model !== undefined && !isRequestModelIdentifier(request.model))
+        throw new TypeError('Invalid CodeBuddy request model id');
     const executable = await resolveCodeBuddyBin(request.bin, request.cwd);
     if (request.signal?.aborted)
         throw abortError();
@@ -52,7 +56,6 @@ export async function* runCodeBuddyAcp(request) {
     let queueBytes = 0;
     let outputBytes = 0;
     let output = '';
-    let messageId;
     let setupSessionId;
     const usage = new AcpUsage();
     let nextId = 0;
@@ -166,7 +169,7 @@ export async function* runCodeBuddyAcp(request) {
         // CodeBuddy emits initial config metadata BEFORE answering session/new.
         // Admit only that non-executing setup notification and bind its ID later.
         if (!sessionId) {
-            if (![...pending.values()].some(entry => entry.method === 'session/new') || row.sessionUpdate !== 'config_option_update')
+            if (![...pending.values()].some(entry => entry.method === 'session/new') || row.sessionUpdate !== 'config_option_update' || !isSessionMetadata(row))
                 throw protocolError();
             if (setupSessionId && setupSessionId !== params.sessionId)
                 throw protocolError();
@@ -174,6 +177,8 @@ export async function* runCodeBuddyAcp(request) {
             return;
         }
         if (params.sessionId !== sessionId)
+            throw protocolError();
+        if (promptResponded && !isSessionMetadata(row))
             throw protocolError();
         for (const event of usage.accept(row))
             push(event);
@@ -190,13 +195,13 @@ export async function* runCodeBuddyAcp(request) {
             const type = row.sessionUpdate === 'agent_message_chunk' ? 'text' : 'reasoning';
             if (type === 'text') {
                 const meta = object(row._meta) ? row._meta : {};
-                const id = row.messageId ?? meta['codebuddy.ai/messageId'];
-                if (id !== undefined && typeof id !== 'string')
-                    throw protocolError();
-                if (typeof id === 'string' && id && id !== messageId) {
-                    output = '';
-                    messageId = id;
+                for (const id of [row.messageId, meta['codebuddy.ai/messageId']]) {
+                    if (id !== undefined && typeof id !== 'string')
+                        throw protocolError();
                 }
+                // Message IDs identify chunks, not finality. Without a verified semantic
+                // final-answer marker, every text part (including ID-less prefixes) stays.
+                // Preserve the exact stream; never interpret/replay JSON or tool-looking text.
                 outputBytes += Buffer.byteLength(delta);
                 if (outputBytes > MAX_BUFFER_BYTES)
                     throw new Error('CodeBuddy ACP response exceeds limit');
@@ -235,6 +240,8 @@ export async function* runCodeBuddyAcp(request) {
         if (owns(value, 'method')) {
             if (typeof value.method !== 'string' || !value.method || owns(value, 'result') || owns(value, 'error'))
                 throw protocolError();
+            if (promptResponded && (value.method !== 'session/update' || owns(value, 'id')))
+                throw protocolError();
             if (owns(value, 'params') && !object(value.params) && !Array.isArray(value.params))
                 throw protocolError();
             if (['session/update', 'session/request_permission'].includes(value.method) && !object(value.params))
@@ -254,10 +261,7 @@ export async function* runCodeBuddyAcp(request) {
                 }
             }
             else if (value.method === 'session/update') {
-                if (promptResponded)
-                    throw protocolError();
-                if (!finished && !stopping)
-                    update(params);
+                update(params);
             }
             else if (value.method === 'session/request_permission') {
                 throw protocolError();
@@ -296,7 +300,9 @@ export async function* runCodeBuddyAcp(request) {
         }
     };
     const onData = (chunk) => {
-        if (failure || stopping)
+        // During successful shutdown still validate frames and accept billing/session
+        // metadata. stdout chunk boundaries must not decide whether a frame is valid.
+        if (failure || (stopping && !promptResponded))
             return;
         try {
             for (const value of decoder.push(chunk))
@@ -307,7 +313,9 @@ export async function* runCodeBuddyAcp(request) {
         }
     };
     const onEnd = () => {
-        if (failure || stopping)
+        // During successful shutdown still validate frames and accept billing/session
+        // metadata. stdout chunk boundaries must not decide whether a frame is valid.
+        if (failure || (stopping && !promptResponded))
             return;
         try {
             for (const value of decoder.finish())
@@ -391,6 +399,8 @@ export async function* runCodeBuddyAcp(request) {
         }
     })();
     let finalResult;
+    let primaryError;
+    let hasPrimaryError = false;
     try {
         while (true) {
             if (failure)
@@ -410,7 +420,25 @@ export async function* runCodeBuddyAcp(request) {
         await terminate(false);
         if (failure)
             throw failure;
+        if (cleanupFailure)
+            throw cleanupFailure;
+        // Metadata arriving in separate stdout reads during cleanup is still billable.
+        // Drain it before the final result rather than dropping it in finally.
+        while (queue.length) {
+            if (failure)
+                throw failure;
+            const next = queue.shift();
+            queueBytes -= next.bytes;
+            yield next.event;
+        }
+        if (failure)
+            throw failure;
         finalResult = { type: 'result', sessionId, text: output };
+    }
+    catch (error) {
+        primaryError = error;
+        hasPrimaryError = true;
+        throw error;
     }
     finally {
         clearTimeout(timer);
@@ -440,8 +468,19 @@ export async function* runCodeBuddyAcp(request) {
         queue.length = 0;
         tools.clear();
         wake = undefined;
-        if (cleanupFailure)
-            throw cleanupFailure;
+        if (cleanupFailure) {
+            if (!hasPrimaryError)
+                throw cleanupFailure;
+            // Preserve the original instance/name (notably auth, abort and timeout).
+            // Only our fixed diagnostic is attached; subprocess exceptions stay private.
+            if (primaryError instanceof Error && primaryError !== cleanupFailure) {
+                try {
+                    Object.defineProperty(primaryError, 'cleanupError', { value: cleanupFailure, configurable: true });
+                    primaryError.message += `; secondary cleanup failure: ${cleanupFailure.message}`;
+                }
+                catch { /* A frozen consumer error must still remain the primary error. */ }
+            }
+        }
     }
     // Nothing remains live while the consumer holds the final yielded event.
     if (finalResult)

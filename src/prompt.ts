@@ -1,4 +1,5 @@
 import type { ContentBlock, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
+/** @deprecated Legacy parser compatibility only; provider replies are opaque ACP output. */
 export { parseResponse } from './response.ts'
 import { strictJson } from './json.ts'
 

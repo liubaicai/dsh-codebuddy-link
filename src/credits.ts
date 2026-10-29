@@ -1,5 +1,6 @@
 import { open } from 'node:fs/promises'
 import type { AccountStatus } from './web.ts'
+import { CODEBUDDY_COMPAT_USER_AGENT } from './compatibility.ts'
 
 const ENDPOINT = 'https://www.codebuddy.cn/v2/billing/meter/get-user-resource'
 const SOURCE = 'CodeBuddy 中国区（实验性只读查询）'
@@ -116,7 +117,7 @@ export function createAccountRefresher(options: AccountRefresherOptions = {}): (
       for (let page = 1; page <= MAX_PAGES; page++) {
         const response = await fetcher(ENDPOINT, {
           method: 'POST', redirect: 'error', signal: controller.signal,
-          headers: { Authorization: `Bearer ${login.token}`, 'X-User-Id': login.uid, 'Content-Type': 'application/json', Accept: 'application/json, text/plain, */*', 'Accept-Language': 'zh-CN,zh;q=0.9', 'User-Agent': 'CLI/2.63.2 CodeBuddy/2.63.2' },
+          headers: { Authorization: `Bearer ${login.token}`, 'X-User-Id': login.uid, 'Content-Type': 'application/json', Accept: 'application/json, text/plain, */*', 'Accept-Language': 'zh-CN,zh;q=0.9', 'User-Agent': CODEBUDDY_COMPAT_USER_AGENT },
           body: JSON.stringify({ PageNumber: page, PageSize: PAGE_SIZE, ProductCode: 'p_tcaca', Status: [0, 3],
             PackageEndTimeRangeBegin: localTime(now), PackageEndTimeRangeEnd: localTime(end) }),
         })

@@ -96,6 +96,7 @@ interface RunSnapshot {
   failure?: 'timeout' | 'queue-timeout' | 'aborted' | 'error';
 }
 interface Status {
+  settingsError: boolean;
   runs: RunSnapshot[];
   config: Config;
   account: Account;
@@ -137,7 +138,7 @@ function parsePool(value: unknown): AccountPool | undefined {
     if (bounded(entry.active, 0, Number.MAX_SAFE_INTEGER)) account.active = entry.active;
     if (entry.quota !== undefined) account.quota = parseAccount(entry.quota);
     if (entry.catalogModels !== undefined) {
-      if (!Array.isArray(entry.catalogModels) || !entry.catalogModels.every(model => isRecord(model) && isModelIdentifier(model.id) && typeof model.name === 'string')) throw new Error('服务端状态格式无效');
+      if (!Array.isArray(entry.catalogModels) || !entry.catalogModels.every(model => isRecord(model) && isRequestModelIdentifier(model.id) && typeof model.name === 'string')) throw new Error('服务端状态格式无效');
       account.catalogModels = entry.catalogModels.map(model => ({id:model.id as string, name:(model.name as string).slice(0, 128)}));
     }
     return account;
@@ -147,9 +148,12 @@ function parsePool(value: unknown): AccountPool | undefined {
 function parseStatus(value: unknown): Status {
   if (!isRecord(value) || !isRecord(value.config) || !isRecord(value.account)) throw new Error('服务端状态格式无效');
   const c = value.config;
-  if (typeof c.enabled !== 'boolean' || typeof c.permissionMode !== 'string' || !strings(c.models) || !strings(c.hiddenModels)
-    || typeof c.defaultModel !== 'string' || typeof c.tools !== 'string' || !Array.isArray(value.catalogModels)
-    || !value.catalogModels.every(model => isRecord(model) && typeof model.id === 'string' && typeof model.name === 'string')
+  if ((value.settingsError !== undefined && typeof value.settingsError !== 'string')
+    || typeof c.enabled !== 'boolean' || typeof c.permissionMode !== 'string'
+    || !strings(c.models) || !c.models.every(isRequestModelIdentifier)
+    || !strings(c.hiddenModels) || !c.hiddenModels.every(isRequestModelIdentifier)
+    || !isRequestModelIdentifier(c.defaultModel) || typeof c.tools !== 'string' || !Array.isArray(value.catalogModels)
+    || !value.catalogModels.every(model => isRecord(model) && isRequestModelIdentifier(model.id) && typeof model.name === 'string')
     || !['ok', 'unavailable', 'auth-required', 'error'].includes(String(value.account.status))) throw new Error('服务端状态格式无效');
   // Missing fields from older servers keep the safe defaults; reject malformed new values.
   const dangerouslySkipPermissions = c.dangerouslySkipPermissions === undefined ? false : c.dangerouslySkipPermissions;
@@ -160,17 +164,23 @@ function parseStatus(value: unknown): Status {
   const stallWarnMs = c.stallWarnMs ?? 90000;
   if (typeof reasoningEffort !== 'string' || !efforts.includes(reasoningEffort) || !bounded(maxConcurrency, 1, 16)
     || !bounded(queueTimeoutMs, 1, 2147483647) || !bounded(stallWarnMs, 0, 2147483647)) throw new Error('服务端状态格式无效');
-  return { config: { enabled:c.enabled, permissionMode:c.permissionMode, models:c.models, hiddenModels:c.hiddenModels,
+  return { settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0,
+    config: { enabled:c.enabled, permissionMode:c.permissionMode, models:c.models, hiddenModels:c.hiddenModels,
     defaultModel:c.defaultModel, tools:c.tools, dangerouslySkipPermissions, reasoningEffort, maxConcurrency, queueTimeoutMs, stallWarnMs },
     account: parseAccount(value.account), accountPool: parsePool(value.accountPool),
     catalogModels: value.catalogModels.map(model => ({id:model.id as string, name:model.name as string})),
     auth: { configured: isRecord(value.auth) && value.auth.configured === true }, runs: parseRuns(value.runs) };
 }
 
-// Kept local because the classic browser entry cannot import server modules.
-function isModelIdentifier(value: unknown): value is string {
-  return typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.exec(value)?.[0] === value
-    && !value.includes(':/') && value.split('/').every(part => part !== '' && part !== '.' && part !== '..');
+// Mirror src/model-id.ts: the classic browser entry cannot import server modules.
+function isRequestModelIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 256 && !/^[a-zA-Z]:/.test(value)
+    && /^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.exec(value)?.[0] === value;
+}
+function isReturnedModelIdentifier(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 256) return false;
+  const parts = value.split('/');
+  return (parts.length === 1 || parts.length === 2) && parts.every(isRequestModelIdentifier) && !value.includes(':/');
 }
 function parseRuns(value: unknown): RunSnapshot[] {
   if (!Array.isArray(value)) return [];
@@ -181,12 +191,12 @@ function parseRuns(value: unknown): RunSnapshot[] {
       || typeof entry.requestedModel !== 'string' || typeof entry.requestedEffort !== 'string'
       || !bounded(entry.queuedAt, 0, Number.MAX_SAFE_INTEGER)) continue;
     const run: RunSnapshot = {id:entry.id, source:entry.source as RunSnapshot['source'], state:entry.state as RunSnapshot['state'],
-      requestedModel:isModelIdentifier(entry.requestedModel) ? entry.requestedModel : 'unknown', requestedEffort:efforts.includes(entry.requestedEffort) ? entry.requestedEffort : 'auto', queuedAt:entry.queuedAt,
+      requestedModel:isRequestModelIdentifier(entry.requestedModel) ? entry.requestedModel : 'unknown', requestedEffort:efforts.includes(entry.requestedEffort) ? entry.requestedEffort : 'auto', queuedAt:entry.queuedAt,
       contextOverrideSent:false, reasoningConfirmed:false, warning:entry.warning === true,
       queuePosition:bounded(entry.queuePosition, 0, Number.MAX_SAFE_INTEGER) ? entry.queuePosition : 0};
     if (typeof entry.accountId === 'string') run.accountId = entry.accountId;
     if (typeof entry.accountName === 'string') run.accountName = entry.accountName.slice(0, 128);
-    if (isModelIdentifier(entry.returnedModel)) run.returnedModel = entry.returnedModel;
+    if (isReturnedModelIdentifier(entry.returnedModel)) run.returnedModel = entry.returnedModel;
     if (entry.contextSource === 'model' || entry.contextSource === 'fallback') run.contextSource = entry.contextSource;
     for (const key of ['contextWindow', 'startedAt', 'lastProgressAt', 'endedAt', 'totalCredits', 'totalCostUsd'] as const) {
       if (typeof entry[key] === 'number' && Number.isFinite(entry[key]) && entry[key] >= 0) run[key] = entry[key];
@@ -251,7 +261,8 @@ const row = { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap
 const field = { display: 'flex', flexDirection: 'column', gap: '5px', minWidth: 0 };
 const text = (value: unknown): string => typeof value === 'string' && value.trim() ? value : '未知';
 const amount = (value: unknown): string => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '未知';
-const safetyHelp = 'ACP 原生工具绕过 DSH 文件沙箱与确认流程，可直接读写文件、执行命令。仅在信任当前工作区时使用。权限模式也用于独立委派；启用的独立委派工具同样不受 DSH 文件沙箱约束。';
+const settingsErrorHelp = 'CodeBuddy 配置无法加载，模型调用已停用。请修复插件 settings.json 或管理员配置后重启 DSH；原文件未修改。';
+const safetyHelp = 'ACP 原生工具绕过 DSH 文件沙箱与确认流程，可直接读写文件、执行命令，也可能继承含凭据的环境变量或读取当前用户的文件。仅在信任当前工作区时使用。权限模式也用于独立委派；启用的独立委派工具同样不受 DSH 文件沙箱约束。';
 const dangerHelp = '默认关闭。启用后为主调用传入 --dangerously-skip-permissions。CLI 仍可能要求高风险确认，客户端不会自动批准残余请求。不会隐式应用到独立委派或标题、压缩等后台请求；CLI 不受 DSH 沙箱与确认流程保护。';
 
 function renderRun(run: RunSnapshot): unknown {
@@ -272,7 +283,7 @@ function renderRun(run: RunSnapshot): unknown {
 }
 
 function SettingsPanel(): unknown {
-  const [status, setStatus] = useState<Status | null>(null);
+  const [status, storeStatus] = useState<Status | null>(null);
   const [draft, setDraft] = useState<Config | null>(null);
   const [busy, setBusy] = useState('加载中');
   const [error, setError] = useState('');
@@ -293,6 +304,29 @@ function SettingsPanel(): unknown {
   const [focusHelp, setFocusHelp] = useState<string | null>(null);
   const [dismissedHelp, setDismissedHelp] = useState<string | null>(null);
   const tooltipPrefix = useRef(`codebuddy-help-${Math.random().toString(36).slice(2)}`);
+  const polling = useRef<Promise<void> | null>(null);
+  const settingsError = useRef(false);
+  // Update the guard synchronously so even handlers captured before recovery mode
+  // cannot save, including before React commits the next render.
+  function setStatus(result: Status): void {
+    settingsError.current = result.settingsError;
+    storeStatus(result);
+  }
+
+  // Polls are read-only and leave controls enabled. An explicit operation reserves
+  // its lock immediately, invalidates the poll, then waits for it to settle.
+  function pollStatus(): void {
+    if (!active.current || polling.current || pending.current || authPending.current) return;
+    const ticket = ++sequence.current;
+    const work = request('status').then(result => {
+      if (!active.current || ticket !== sequence.current) return;
+      setStatus(result);
+      setDraft(previous => previous ?? result.config);
+    }).catch(() => {
+      // Background failures must not hide explicit errors or prevent queued work.
+    }).finally(() => { if (polling.current === work) polling.current = null; });
+    polling.current = work;
+  }
 
   // Hold the in-flight lock across the full chain and check generation after every await.
   async function refreshAccount(current: () => boolean): Promise<void> {
@@ -311,9 +345,12 @@ function SettingsPanel(): unknown {
     if ((action === 'poll' || action === 'cancel') && !authFlow) return;
     authPending.current = true;
     const ticket = ++authSequence.current;
+    ++sequence.current;
     setAuthBusy(true); setAuthError(''); setAuthNotice('');
     const current = () => active.current && ticket === authSequence.current;
     try {
+      if (polling.current) await polling.current;
+      if (!current()) return;
       const result = await requestAuth(action, action === 'poll' || action === 'cancel' ? { flowId: authFlow!.flowId }
         : accountId ? {accountId} : {});
       if (!current()) return;
@@ -340,13 +377,15 @@ function SettingsPanel(): unknown {
     }
   }
 
-  async function load(action: 'initial' | 'status' | 'refresh' | 'config' | 'models', config?: Config, automatic = false): Promise<void> {
-    if (!active.current || pending.current || authPending.current) return;
+  async function load(action: 'initial' | 'refresh' | 'config' | 'models', config?: Config): Promise<void> {
+    if (!active.current || pending.current || authPending.current || (action === 'config' && settingsError.current)) return;
     pending.current = true;
     const ticket = ++sequence.current;
-    if (!automatic) { setBusy(action === 'config' ? '保存中' : action === 'refresh' ? '刷新中' : '加载中'); setError(''); setNotice(''); }
+    setBusy(action === 'config' ? '保存中' : action === 'refresh' ? '刷新中' : '加载中'); setError(''); setNotice('');
     const current = () => active.current && ticket === sequence.current;
     try {
+      if (polling.current) await polling.current;
+      if (!current() || (action === 'config' && settingsError.current)) return;
       if (action !== 'refresh') {
         const endpoint = action === 'initial' ? 'status' : action;
         const result = await request(endpoint, endpoint === 'status' ? undefined : endpoint === 'models' ? {} : {
@@ -360,9 +399,9 @@ function SettingsPanel(): unknown {
       }
       if (action === 'initial' || action === 'refresh') await refreshAccount(current);
       if (!current()) return;
-      if (!automatic) setNotice(action === 'config' ? '设置已保存' : action === 'refresh' ? '账户状态已刷新' : '');
+      setNotice(action === 'config' ? '设置已保存' : action === 'refresh' ? '账户状态已刷新' : '');
     } catch (cause) {
-      if (!automatic && current()) setError(cause instanceof Error ? cause.message : '请求失败，请重试');
+      if (current()) setError(cause instanceof Error ? cause.message : '请求失败，请重试');
     } finally {
       if (ticket === sequence.current) { pending.current = false; if (active.current) setBusy(''); }
     }
@@ -374,6 +413,8 @@ function SettingsPanel(): unknown {
     const ticket = ++sequence.current;
     setBusy('更新中'); setError(''); setNotice('');
     try {
+      if (polling.current) await polling.current;
+      if (!active.current || ticket !== sequence.current) return;
       const result = await request(action, body);
       if (!active.current || ticket !== sequence.current) return;
       setStatus(result); setRenaming(null); setRemoving(null); setNotice('账户已更新');
@@ -386,9 +427,10 @@ function SettingsPanel(): unknown {
 
   useEffect(() => {
     active.current = true;
+    setAuthBusy(false);
     void load('initial');
-    const timer = setInterval(() => { void load('status', undefined, true); }, 2000);
-    return () => { clearInterval(timer); active.current = false; ++sequence.current; ++authSequence.current; pending.current = false; authPending.current = false; };
+    const timer = setInterval(pollStatus, 2000);
+    return () => { clearInterval(timer); active.current = false; ++sequence.current; ++authSequence.current; pending.current = false; authPending.current = false; polling.current = null; };
   }, []);
 
   function help(key: string, label: string, description: string, trigger: string = '?'): unknown {
@@ -436,6 +478,7 @@ function SettingsPanel(): unknown {
     h('div', {style:{...row, justifyContent:'space-between', marginBottom:'12px'}}, h('h2', {style:{margin:0, fontSize:'16px'}}, 'CodeBuddy'),
       status ? h('span', {style:{fontSize:'12px', color:secondary}}, status.config.enabled ? '已启用' : '未启用') : null),
     h('div', {role:'status', 'aria-live':'polite', style:{color:secondary, marginBottom:busy || notice ? '8px' : 0}}, busy ? `${busy}…` : notice),
+    status?.settingsError ? h('div', {role:'alert', style:{marginBottom:'10px'}}, settingsErrorHelp) : null,
     error ? h('div', {role:'alert', style:{marginBottom:'10px'}}, error,
       !status ? h('button', {type:'button', disabled:!!busy, onClick:() => void load('initial')}, '重试加载') : null) : null,
     h('section', {style:box, 'aria-label':'账户列表'},
@@ -505,7 +548,7 @@ function SettingsPanel(): unknown {
           h('input', {type:'checkbox', name:'dangerouslySkipPermissions', checked:draft.dangerouslySkipPermissions,
             onChange:(event:{target:{checked:boolean}}) => update({dangerouslySkipPermissions:event.target.checked})}), '跳过 CLI 权限检查'),
           help('danger', '跳过 CLI 权限检查风险说明', dangerHelp, '危险')),
-        h('button', {type:'button', disabled:locked || !validDefault || !validMode || !validEffort, onClick:() => void load('config', draft)}, '保存设置')),
+        h('button', {type:'button', disabled:locked || !!status?.settingsError || !validDefault || !validMode || !validEffort, onClick:() => void load('config', draft)}, '保存设置')),
       !validDefault || !validMode || !validEffort ? h('p', {role:'alert'}, '请选择有效的权限模式、推理强度与已启用的默认模型。') : null) : null,
     h('details', {style:box, 'aria-label':'运行记录'},
       h('summary', {style:{cursor:'pointer', fontWeight:600}}, `运行记录（${status?.runs.length ?? 0}）`),

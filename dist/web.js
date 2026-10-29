@@ -1,4 +1,5 @@
 import { isModelIdentifier } from "./metadata.js";
+import { isRequestModelIdentifier } from "./model-id.js";
 import { isCodeBuddyEffort } from "./config.js";
 export function registerSettingsRoutes(server, store, notify, refreshAccount = async () => ({ status: 'unavailable', message: '账户积分接口尚不可用；请在 CodeBuddy / WorkBuddy 客户端查看。' }), auth, refreshModels, readRuns = () => [], accounts) {
     let account = { status: 'unavailable', message: '点击刷新查询账户积分。' };
@@ -9,6 +10,7 @@ export function registerSettingsRoutes(server, store, notify, refreshAccount = a
     let modelMessage = '';
     const resetAccount = () => { generation++; pending = undefined; modelPending = undefined; catalog = []; modelMessage = ''; accounts?.changed(); notify(); account = { status: 'unavailable', message: '账户已更新，请刷新积分。' }; };
     const snapshot = async () => ({
+        ...(store.loadError ? { settingsError: store.loadError } : {}),
         modelMessage,
         ...(accounts ? { accountPool: accounts.snapshot() } : {}),
         auth: auth ? await auth.status() : { configured: false },
@@ -161,7 +163,7 @@ function publicRuns(values) {
             || typeof run.queuedAt !== 'number' || !Number.isFinite(run.queuedAt))
             continue;
         const clean = { id: run.id, source: run.source, state: run.state,
-            requestedModel: isModelIdentifier(run.requestedModel) ? run.requestedModel : 'unknown', requestedEffort: isCodeBuddyEffort(run.requestedEffort) ? run.requestedEffort : 'auto', queuedAt: run.queuedAt,
+            requestedModel: isRequestModelIdentifier(run.requestedModel) ? run.requestedModel : 'unknown', requestedEffort: isCodeBuddyEffort(run.requestedEffort) ? run.requestedEffort : 'auto', queuedAt: run.queuedAt,
             contextOverrideSent: false, reasoningConfirmed: false, warning: run.warning === true,
             queuePosition: Number.isSafeInteger(run.queuePosition) && Number(run.queuePosition) >= 0 ? run.queuePosition : 0 };
         if (typeof run.accountId === 'string' && /^[a-f0-9]{32}$/.test(run.accountId))

@@ -1,4 +1,2 @@
-/** Bounded model IDs, not arbitrary URLs or absolute/relative filesystem paths.
- * This validates syntax; it cannot recognize secrets disguised as valid model IDs.
- */
-export declare function isModelIdentifier(value: unknown): value is string;
+/** Compatibility export for returned model metadata; requests use the bare-ID validator. */
+export { isReturnedModelIdentifier as isModelIdentifier } from './model-id.ts';

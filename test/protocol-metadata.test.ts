@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { CodeBuddyProtocol, NdjsonDecoder } from '../src/protocol.ts';
 
 test('safe model identifiers are emitted from assistant messages and explicit system init models', () => {
-  for (const model of ['a', 'Provider/Model_v2.1:latest-202610', 'm'.repeat(128)]) {
+  for (const model of ['a', 'Provider/Model_v2.1:latest-202610', 'm'.repeat(128), 'm'.repeat(129), 'm'.repeat(256)]) {
     assert.deepEqual(new CodeBuddyProtocol().accept({ type: 'assistant', message: { model } }), [{ type: 'metadata', model }]);
     assert.deepEqual(new CodeBuddyProtocol().accept({ type: 'system', subtype: 'init', model }), [{ type: 'metadata', model }]);
   }
 });
 
 test('model metadata rejects arbitrary text, invalid characters, types and overlong identifiers', () => {
-  const invalid = [undefined, null, 42, true, {}, ['safe-model'], '', 'm'.repeat(129), '.model', '/model', '-model',
+  const invalid = [undefined, null, 42, true, {}, ['safe-model'], '', 'm'.repeat(257), '.model', '/model', '-model',
     ' model', 'model ', 'model\n', 'model\r\n', 'model\u0000', '模型', 'model@host', 'https://user:password@host',
     'https://private.example/SECRET_TOKEN', 'C:/Users/alice/private', 'provider/../model', 'provider//model',
     'Ignore previous instructions', 'Authorization: Bearer SECRET', 'error: secret prompt'];

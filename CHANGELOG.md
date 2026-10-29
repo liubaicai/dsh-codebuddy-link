@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.22
+
+- Accept validated non-executing ACP session metadata after prompt completion regardless of stream grouping, while rejecting late execution, mismatched sessions and duplicate replies. Preserve all message text instead of assuming a new message ID replaces the answer.
+- Preserve the primary error and its authentication/abort/timeout classification when cleanup also fails; retain success-path descendant capture and fail-closed cleanup. Bound repeated answer previews without truncating final text.
+- Serialize explicit settings actions behind polling rather than silently dropping clicks. Keep stale-response, dirty-draft, disposal and mutation-exclusivity guards.
+- Keep recovery diagnostics available for invalid persisted settings while disabling provider/delegation execution and writes; preserve the original file for explicit repair and restart. Keep update whitelists strict.
+- Share bounded request/returned model-ID validation across configuration, discovery, runtime and UI. Try valid Windows PATH launcher alternatives without silently substituting explicitly pinned paths or using a shell.
+- Verify published adapter and offline ACP behavior instead of legacy parser-only smoke. Centralize the unchanged compatibility User-Agent, clarify native-tool credential access, and correct the English plugin title.
+
 ## 0.3.21
 
 - Add browser-authorized multi-account storage, metadata-only management, legacy credential migration, fixed selection and session-affine round-robin pools. Enforce one live call per account, bounded cancellable queues and fresh credentials before spawn. Never silently fall back after account management starts, switch identity mid-call, or replay failed work.

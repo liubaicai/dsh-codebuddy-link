@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, copyFile, rm, readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runCodeBuddy, resolveCodeBuddyBin, childEnv, type BridgeEvent } from '../src/runner.ts';
@@ -113,6 +113,83 @@ test('Windows npm shim resolves to JavaScript without shell execution', async t 
   // Windows runners can expose TEMP through an 8.3 alias; resolver canonicalizes it.
   assert.equal(resolved.args[0], await realpath(target));
 });
+test('runner accepts bounded bare model IDs and rejects unsafe requests before spawning', async t => {
+  const f = await fixture(t);
+  for (const length of [128, 129, 256]) {
+    const model = 'm'.repeat(length);
+    const events = await collect(runCodeBuddy({ ...f, prompt: 'argv', model }));
+    const result = events.at(-1);
+    assert.equal(result?.type, 'result');
+    if (result?.type !== 'result') continue;
+    const args: string[] = JSON.parse(result.text);
+    assert.equal(args[args.indexOf('--model') + 1], model);
+  }
+  for (const model of ['m'.repeat(257), 'provider/model', 'https://host/model', '../model', 'C:model', 'model\n']) {
+    let spawned = false;
+    await assert.rejects(collect(runCodeBuddy({ ...f, prompt: 'argv', model, onSpawn: () => { spawned = true; } })), /Invalid model id/);
+    assert.equal(spawned, false);
+  }
+});
+
+async function windowsPathFixture(t: { after(fn: () => Promise<void>): void }) {
+  const f = await fixture(t);
+  const first = join(f.cwd, 'first'), later = join(f.cwd, 'later');
+  await mkdir(first); await mkdir(later);
+  const original = process.env.PATH;
+  process.env.PATH = [first, later].join(delimiter);
+  t.after(async () => { if (original === undefined) delete process.env.PATH; else process.env.PATH = original; });
+  const target = join(first, 'node_modules', 'fake', 'cli.js');
+  await mkdir(dirname(target), { recursive: true });
+  await writeFile(target, 'throw Error("must not execute during resolution")');
+  return { ...f, first, later, target };
+}
+
+test('Windows PATH skips an unsupported extensionless shell launcher for its npm cmd sibling', { skip: process.platform !== 'win32' }, async t => {
+  const f = await windowsPathFixture(t);
+  await writeFile(join(f.first, 'buddy'), '#!/bin/sh\necho UNSUPPORTED');
+  await writeFile(join(f.first, 'buddy.cmd'), '@ECHO off\r\n"node" "%dp0%\\node_modules\\fake\\cli.js" %*');
+  assert.deepEqual(await resolveCodeBuddyBin('buddy'), { command: process.execPath, args: [await realpath(f.target)] });
+  await assert.rejects(resolveCodeBuddyBin(join(f.first, 'buddy')), /Unsupported CodeBuddy launcher/);
+  await assert.rejects(resolveCodeBuddyBin('./first/buddy', f.cwd), /Unsupported CodeBuddy launcher/);
+});
+
+test('Windows PATH tries native exe siblings and later installations without a shell', { skip: process.platform !== 'win32' }, async t => {
+  const f = await windowsPathFixture(t);
+  await writeFile(join(f.first, 'buddy'), '#!/bin/sh\necho UNSUPPORTED');
+  const exe = join(f.first, 'buddy.exe');
+  await copyFile(process.execPath, exe);
+  assert.deepEqual(await resolveCodeBuddyBin('buddy'), { command: await realpath(exe), args: [] });
+  await writeFile(join(f.first, 'laterbuddy'), 'unsupported');
+  await writeFile(join(f.first, 'laterbuddy.cmd'), 'echo UNSUPPORTED');
+  const later = join(f.later, 'laterbuddy.exe');
+  await copyFile(process.execPath, later);
+  assert.deepEqual(await resolveCodeBuddyBin('laterbuddy'), { command: await realpath(later), args: [] });
+  // A nonexistent explicit pin must not silently substitute a sibling either.
+  await assert.rejects(resolveCodeBuddyBin(join(f.first, 'missing')), /not found/);
+  await writeFile(join(f.first, 'missing.cmd'), '@ECHO off\r\n"node" "%dp0%\\node_modules\\fake\\cli.js" %*');
+  await assert.rejects(resolveCodeBuddyBin(join(f.first, 'missing')), /not found/);
+});
+
+test('Windows PATH skips malformed npm shim targets but explicit bad shims fail closed', { skip: process.platform !== 'win32' }, async t => {
+  const f = await windowsPathFixture(t);
+  const valid = join(f.later, 'buddy.exe');
+  await copyFile(process.execPath, valid);
+  const shim = join(f.first, 'buddy.cmd');
+  const shellTarget = join(f.first, 'node_modules', 'fake', 'shell.cmd');
+  const noNode = join(f.first, 'node_modules', 'fake', 'shell');
+  await writeFile(shellTarget, 'echo MUST_NOT_EXECUTE');
+  await writeFile(noNode, '#!/bin/sh\necho MUST_NOT_EXECUTE');
+  for (const target of ['missing.js', '.', 'shell.cmd', 'shell']) {
+    await writeFile(shim, `@ECHO off\r\n"node" "%dp0%\\node_modules\\fake\\${target}" %*`);
+    assert.deepEqual(await resolveCodeBuddyBin('buddy'), { command: await realpath(valid), args: [] });
+    await assert.rejects(resolveCodeBuddyBin(shim));
+  }
+  const nodeTarget = join(f.first, 'node_modules', 'fake', 'node-entry');
+  await writeFile(nodeTarget, '#!/usr/bin/env node\nthrow Error("must not execute")');
+  await writeFile(shim, '@ECHO off\r\n"node" "%dp0%\\node_modules\\fake\\node-entry" %*');
+  assert.deepEqual(await resolveCodeBuddyBin(shim), { command: process.execPath, args: [await realpath(nodeTarget)] });
+});
+
 test('childEnv forces ELECTRON_RUN_AS_NODE so Electron hosts spawn plain Node children', () => {
   const env = childEnv();
   assert.equal(env.ELECTRON_RUN_AS_NODE, '1');

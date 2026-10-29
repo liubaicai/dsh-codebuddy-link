@@ -64,7 +64,7 @@ function parsePool(value) {
         if (entry.quota !== undefined)
             account.quota = parseAccount(entry.quota);
         if (entry.catalogModels !== undefined) {
-            if (!Array.isArray(entry.catalogModels) || !entry.catalogModels.every(model => isRecord(model) && isModelIdentifier(model.id) && typeof model.name === 'string'))
+            if (!Array.isArray(entry.catalogModels) || !entry.catalogModels.every(model => isRecord(model) && isRequestModelIdentifier(model.id) && typeof model.name === 'string'))
                 throw new Error('服务端状态格式无效');
             account.catalogModels = entry.catalogModels.map(model => ({ id: model.id, name: model.name.slice(0, 128) }));
         }
@@ -76,9 +76,12 @@ function parseStatus(value) {
     if (!isRecord(value) || !isRecord(value.config) || !isRecord(value.account))
         throw new Error('服务端状态格式无效');
     const c = value.config;
-    if (typeof c.enabled !== 'boolean' || typeof c.permissionMode !== 'string' || !strings(c.models) || !strings(c.hiddenModels)
-        || typeof c.defaultModel !== 'string' || typeof c.tools !== 'string' || !Array.isArray(value.catalogModels)
-        || !value.catalogModels.every(model => isRecord(model) && typeof model.id === 'string' && typeof model.name === 'string')
+    if ((value.settingsError !== undefined && typeof value.settingsError !== 'string')
+        || typeof c.enabled !== 'boolean' || typeof c.permissionMode !== 'string'
+        || !strings(c.models) || !c.models.every(isRequestModelIdentifier)
+        || !strings(c.hiddenModels) || !c.hiddenModels.every(isRequestModelIdentifier)
+        || !isRequestModelIdentifier(c.defaultModel) || typeof c.tools !== 'string' || !Array.isArray(value.catalogModels)
+        || !value.catalogModels.every(model => isRecord(model) && isRequestModelIdentifier(model.id) && typeof model.name === 'string')
         || !['ok', 'unavailable', 'auth-required', 'error'].includes(String(value.account.status)))
         throw new Error('服务端状态格式无效');
     // Missing fields from older servers keep the safe defaults; reject malformed new values.
@@ -92,16 +95,23 @@ function parseStatus(value) {
     if (typeof reasoningEffort !== 'string' || !efforts.includes(reasoningEffort) || !bounded(maxConcurrency, 1, 16)
         || !bounded(queueTimeoutMs, 1, 2147483647) || !bounded(stallWarnMs, 0, 2147483647))
         throw new Error('服务端状态格式无效');
-    return { config: { enabled: c.enabled, permissionMode: c.permissionMode, models: c.models, hiddenModels: c.hiddenModels,
+    return { settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0,
+        config: { enabled: c.enabled, permissionMode: c.permissionMode, models: c.models, hiddenModels: c.hiddenModels,
             defaultModel: c.defaultModel, tools: c.tools, dangerouslySkipPermissions, reasoningEffort, maxConcurrency, queueTimeoutMs, stallWarnMs },
         account: parseAccount(value.account), accountPool: parsePool(value.accountPool),
         catalogModels: value.catalogModels.map(model => ({ id: model.id, name: model.name })),
         auth: { configured: isRecord(value.auth) && value.auth.configured === true }, runs: parseRuns(value.runs) };
 }
-// Kept local because the classic browser entry cannot import server modules.
-function isModelIdentifier(value) {
-    return typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/.exec(value)?.[0] === value
-        && !value.includes(':/') && value.split('/').every(part => part !== '' && part !== '.' && part !== '..');
+// Mirror src/model-id.ts: the classic browser entry cannot import server modules.
+function isRequestModelIdentifier(value) {
+    return typeof value === 'string' && value.length <= 256 && !/^[a-zA-Z]:/.test(value)
+        && /^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.exec(value)?.[0] === value;
+}
+function isReturnedModelIdentifier(value) {
+    if (typeof value !== 'string' || value.length > 256)
+        return false;
+    const parts = value.split('/');
+    return (parts.length === 1 || parts.length === 2) && parts.every(isRequestModelIdentifier) && !value.includes(':/');
 }
 function parseRuns(value) {
     if (!Array.isArray(value))
@@ -114,14 +124,14 @@ function parseRuns(value) {
             || !bounded(entry.queuedAt, 0, Number.MAX_SAFE_INTEGER))
             continue;
         const run = { id: entry.id, source: entry.source, state: entry.state,
-            requestedModel: isModelIdentifier(entry.requestedModel) ? entry.requestedModel : 'unknown', requestedEffort: efforts.includes(entry.requestedEffort) ? entry.requestedEffort : 'auto', queuedAt: entry.queuedAt,
+            requestedModel: isRequestModelIdentifier(entry.requestedModel) ? entry.requestedModel : 'unknown', requestedEffort: efforts.includes(entry.requestedEffort) ? entry.requestedEffort : 'auto', queuedAt: entry.queuedAt,
             contextOverrideSent: false, reasoningConfirmed: false, warning: entry.warning === true,
             queuePosition: bounded(entry.queuePosition, 0, Number.MAX_SAFE_INTEGER) ? entry.queuePosition : 0 };
         if (typeof entry.accountId === 'string')
             run.accountId = entry.accountId;
         if (typeof entry.accountName === 'string')
             run.accountName = entry.accountName.slice(0, 128);
-        if (isModelIdentifier(entry.returnedModel))
+        if (isReturnedModelIdentifier(entry.returnedModel))
             run.returnedModel = entry.returnedModel;
         if (entry.contextSource === 'model' || entry.contextSource === 'fallback')
             run.contextSource = entry.contextSource;
@@ -213,7 +223,8 @@ const row = { display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap
 const field = { display: 'flex', flexDirection: 'column', gap: '5px', minWidth: 0 };
 const text = (value) => typeof value === 'string' && value.trim() ? value : '未知';
 const amount = (value) => typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '未知';
-const safetyHelp = 'ACP 原生工具绕过 DSH 文件沙箱与确认流程，可直接读写文件、执行命令。仅在信任当前工作区时使用。权限模式也用于独立委派；启用的独立委派工具同样不受 DSH 文件沙箱约束。';
+const settingsErrorHelp = 'CodeBuddy 配置无法加载，模型调用已停用。请修复插件 settings.json 或管理员配置后重启 DSH；原文件未修改。';
+const safetyHelp = 'ACP 原生工具绕过 DSH 文件沙箱与确认流程，可直接读写文件、执行命令，也可能继承含凭据的环境变量或读取当前用户的文件。仅在信任当前工作区时使用。权限模式也用于独立委派；启用的独立委派工具同样不受 DSH 文件沙箱约束。';
 const dangerHelp = '默认关闭。启用后为主调用传入 --dangerously-skip-permissions。CLI 仍可能要求高风险确认，客户端不会自动批准残余请求。不会隐式应用到独立委派或标题、压缩等后台请求；CLI 不受 DSH 沙箱与确认流程保护。';
 function renderRun(run) {
     const labels = { queued: '排队中', starting: '启动中', waiting: '等待响应', responding: '响应中', completed: '已完成', failed: '失败', cancelled: '已取消' };
@@ -222,7 +233,7 @@ function renderRun(run) {
     return h('article', { key: run.id, style: { borderTop: border, padding: '8px 0', overflowWrap: 'anywhere' } }, h('div', { style: row }, h('strong', null, labels[run.state]), h('span', null, run.source === 'model' ? '模型调用' : '独立委派'), h('span', { style: { color: secondary } }, run.requestedModel), run.accountName ? h('span', null, run.accountName) : null, run.state === 'queued' ? h('span', null, `队列位置：${run.queuePosition}`) : null), h('p', null, `请求模型：${text(run.requestedModel)}；返回模型：${text(run.returnedModel)}`), h('p', null, `请求推理强度：${text(run.requestedEffort)}（服务端未确认）`), h('p', null, `DSH 上下文预算：${run.contextWindow ?? '未知'}；来源：${run.contextSource === 'model' ? '模型元数据' : run.contextSource === 'fallback' ? '回退配置' : '未知'}；未向 CLI 覆盖上下文限制`), h('p', null, `积分：${amount(run.totalCredits)}；费用（USD）：${amount(run.totalCostUsd)}`), h('p', null, `入队：${time(run.queuedAt)}；开始：${time(run.startedAt)}；进展：${time(run.lastProgressAt)}；结束：${time(run.endedAt)}`), run.warning ? h('p', { role: 'status' }, '长时间无进展，仍在等待；这不代表调用失败。') : null, run.failure ? h('p', null, failures[run.failure]) : null);
 }
 function SettingsPanel() {
-    const [status, setStatus] = useState(null);
+    const [status, storeStatus] = useState(null);
     const [draft, setDraft] = useState(null);
     const [busy, setBusy] = useState('加载中');
     const [error, setError] = useState('');
@@ -243,6 +254,31 @@ function SettingsPanel() {
     const [focusHelp, setFocusHelp] = useState(null);
     const [dismissedHelp, setDismissedHelp] = useState(null);
     const tooltipPrefix = useRef(`codebuddy-help-${Math.random().toString(36).slice(2)}`);
+    const polling = useRef(null);
+    const settingsError = useRef(false);
+    // Update the guard synchronously so even handlers captured before recovery mode
+    // cannot save, including before React commits the next render.
+    function setStatus(result) {
+        settingsError.current = result.settingsError;
+        storeStatus(result);
+    }
+    // Polls are read-only and leave controls enabled. An explicit operation reserves
+    // its lock immediately, invalidates the poll, then waits for it to settle.
+    function pollStatus() {
+        if (!active.current || polling.current || pending.current || authPending.current)
+            return;
+        const ticket = ++sequence.current;
+        const work = request('status').then(result => {
+            if (!active.current || ticket !== sequence.current)
+                return;
+            setStatus(result);
+            setDraft(previous => previous ?? result.config);
+        }).catch(() => {
+            // Background failures must not hide explicit errors or prevent queued work.
+        }).finally(() => { if (polling.current === work)
+            polling.current = null; });
+        polling.current = work;
+    }
     // Hold the in-flight lock across the full chain and check generation after every await.
     async function refreshAccount(current) {
         const account = await request('refresh', {});
@@ -265,11 +301,16 @@ function SettingsPanel() {
             return;
         authPending.current = true;
         const ticket = ++authSequence.current;
+        ++sequence.current;
         setAuthBusy(true);
         setAuthError('');
         setAuthNotice('');
         const current = () => active.current && ticket === authSequence.current;
         try {
+            if (polling.current)
+                await polling.current;
+            if (!current())
+                return;
             const result = await requestAuth(action, action === 'poll' || action === 'cancel' ? { flowId: authFlow.flowId }
                 : accountId ? { accountId } : {});
             if (!current())
@@ -310,18 +351,20 @@ function SettingsPanel() {
             }
         }
     }
-    async function load(action, config, automatic = false) {
-        if (!active.current || pending.current || authPending.current)
+    async function load(action, config) {
+        if (!active.current || pending.current || authPending.current || (action === 'config' && settingsError.current))
             return;
         pending.current = true;
         const ticket = ++sequence.current;
-        if (!automatic) {
-            setBusy(action === 'config' ? '保存中' : action === 'refresh' ? '刷新中' : '加载中');
-            setError('');
-            setNotice('');
-        }
+        setBusy(action === 'config' ? '保存中' : action === 'refresh' ? '刷新中' : '加载中');
+        setError('');
+        setNotice('');
         const current = () => active.current && ticket === sequence.current;
         try {
+            if (polling.current)
+                await polling.current;
+            if (!current() || (action === 'config' && settingsError.current))
+                return;
             if (action !== 'refresh') {
                 const endpoint = action === 'initial' ? 'status' : action;
                 const result = await request(endpoint, endpoint === 'status' ? undefined : endpoint === 'models' ? {} : {
@@ -340,11 +383,10 @@ function SettingsPanel() {
                 await refreshAccount(current);
             if (!current())
                 return;
-            if (!automatic)
-                setNotice(action === 'config' ? '设置已保存' : action === 'refresh' ? '账户状态已刷新' : '');
+            setNotice(action === 'config' ? '设置已保存' : action === 'refresh' ? '账户状态已刷新' : '');
         }
         catch (cause) {
-            if (!automatic && current())
+            if (current())
                 setError(cause instanceof Error ? cause.message : '请求失败，请重试');
         }
         finally {
@@ -364,6 +406,10 @@ function SettingsPanel() {
         setError('');
         setNotice('');
         try {
+            if (polling.current)
+                await polling.current;
+            if (!active.current || ticket !== sequence.current)
+                return;
             const result = await request(action, body);
             if (!active.current || ticket !== sequence.current)
                 return;
@@ -386,9 +432,10 @@ function SettingsPanel() {
     }
     useEffect(() => {
         active.current = true;
+        setAuthBusy(false);
         void load('initial');
-        const timer = setInterval(() => { void load('status', undefined, true); }, 2000);
-        return () => { clearInterval(timer); active.current = false; ++sequence.current; ++authSequence.current; pending.current = false; authPending.current = false; };
+        const timer = setInterval(pollStatus, 2000);
+        return () => { clearInterval(timer); active.current = false; ++sequence.current; ++authSequence.current; pending.current = false; authPending.current = false; polling.current = null; };
     }, []);
     function help(key, label, description, trigger = '?') {
         const id = `${tooltipPrefix.current}-${key}`;
@@ -426,7 +473,7 @@ function SettingsPanel() {
         return h('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } }, h('div', { style: { ...row, gap: '10px', color: secondary, fontSize: '12px' } }, h('span', null, `剩余：${amount(account?.remaining)}`), h('span', null, `总额：${amount(account?.total)}`), h('span', null, `已用：${amount(account?.used)}`), account?.status && account.status !== 'ok' ? h('span', null, accountLabels[account.status]) : null), percent === undefined ? null : h('div', { role: 'meter', 'aria-label': '剩余积分比例', 'aria-valuenow': percent, 'aria-valuemin': 0, 'aria-valuemax': 100,
             style: { height: '4px', borderRadius: '2px', background: 'var(--gray-4, #e8e8ec)', overflow: 'hidden' } }, h('div', { style: { width: `${percent}%`, height: '100%', background: accent } })));
     }
-    return h('section', { 'aria-label': 'CodeBuddy 设置', style: { maxWidth: '800px', width: '100%', boxSizing: 'border-box', padding: '16px', fontSize: '13px', lineHeight: 1.5, color: foreground } }, h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '12px' } }, h('h2', { style: { margin: 0, fontSize: '16px' } }, 'CodeBuddy'), status ? h('span', { style: { fontSize: '12px', color: secondary } }, status.config.enabled ? '已启用' : '未启用') : null), h('div', { role: 'status', 'aria-live': 'polite', style: { color: secondary, marginBottom: busy || notice ? '8px' : 0 } }, busy ? `${busy}…` : notice), error ? h('div', { role: 'alert', style: { marginBottom: '10px' } }, error, !status ? h('button', { type: 'button', disabled: !!busy, onClick: () => void load('initial') }, '重试加载') : null) : null, h('section', { style: box, 'aria-label': '账户列表' }, h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '10px' } }, h('h3', { style: { margin: 0 } }, '账户'), h('div', { style: row }, h('button', { type: 'button', disabled: accountLocked || !status, onClick: () => void load('refresh') }, '刷新账户'), h('button', { type: 'button', disabled: accountLocked || !status, onClick: () => void authenticate('start') }, '添加账户'))), h('div', { role: 'group', 'aria-label': '账户使用方式', style: { ...row, marginBottom: '10px' } }, h('button', { type: 'button', 'aria-pressed': pool?.mode === 'fixed', disabled: accountLocked || !pool?.accounts.some(account => account.enabled && account.authState === 'ready'),
+    return h('section', { 'aria-label': 'CodeBuddy 设置', style: { maxWidth: '800px', width: '100%', boxSizing: 'border-box', padding: '16px', fontSize: '13px', lineHeight: 1.5, color: foreground } }, h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '12px' } }, h('h2', { style: { margin: 0, fontSize: '16px' } }, 'CodeBuddy'), status ? h('span', { style: { fontSize: '12px', color: secondary } }, status.config.enabled ? '已启用' : '未启用') : null), h('div', { role: 'status', 'aria-live': 'polite', style: { color: secondary, marginBottom: busy || notice ? '8px' : 0 } }, busy ? `${busy}…` : notice), status?.settingsError ? h('div', { role: 'alert', style: { marginBottom: '10px' } }, settingsErrorHelp) : null, error ? h('div', { role: 'alert', style: { marginBottom: '10px' } }, error, !status ? h('button', { type: 'button', disabled: !!busy, onClick: () => void load('initial') }, '重试加载') : null) : null, h('section', { style: box, 'aria-label': '账户列表' }, h('div', { style: { ...row, justifyContent: 'space-between', marginBottom: '10px' } }, h('h3', { style: { margin: 0 } }, '账户'), h('div', { style: row }, h('button', { type: 'button', disabled: accountLocked || !status, onClick: () => void load('refresh') }, '刷新账户'), h('button', { type: 'button', disabled: accountLocked || !status, onClick: () => void authenticate('start') }, '添加账户'))), h('div', { role: 'group', 'aria-label': '账户使用方式', style: { ...row, marginBottom: '10px' } }, h('button', { type: 'button', 'aria-pressed': pool?.mode === 'fixed', disabled: accountLocked || !pool?.accounts.some(account => account.enabled && account.authState === 'ready'),
         style: pool?.mode === 'fixed' ? selectedStyle : {}, onClick: () => void manageAccount('account/select', { mode: 'fixed', accountId: pool?.selectedAccountId ?? pool?.accounts.find(account => account.enabled && account.authState === 'ready')?.id }) }, '固定账户'), h('button', { type: 'button', 'aria-pressed': pool?.mode === 'pool', disabled: accountLocked || !pool,
         style: pool?.mode === 'pool' ? selectedStyle : {}, onClick: () => void manageAccount('account/select', { mode: 'pool' }) }, '账户池')), ...(pool?.accounts ?? []).map(account => h('div', { key: account.id, 'aria-label': `账户 ${account.name}`, style: { borderTop: border, padding: '10px 0', display: 'flex', flexDirection: 'column', gap: '6px' } }, h('div', { style: { ...row, justifyContent: 'space-between' } }, h('div', { style: { ...row, minWidth: 0 } }, h('strong', { style: { overflowWrap: 'anywhere' } }, account.name), h('span', { style: { fontSize: '12px', color: secondary } }, !account.enabled ? '已停用' : account.authState === 'ready' ? '已授权' : '需授权'), pool.mode === 'fixed' && pool.selectedAccountId === account.id ? h('span', { style: { fontSize: '12px', color: accent } }, '当前') : null, account.active ? h('span', { style: { fontSize: '12px', color: secondary } }, `运行中 ${account.active}`) : null), h('div', { style: row }, h('button', { type: 'button', disabled: accountLocked || !account.enabled || account.authState !== 'ready' || (pool.mode === 'fixed' && pool.selectedAccountId === account.id), onClick: () => void manageAccount('account/select', { mode: 'fixed', accountId: account.id }) }, '使用'), h('button', { type: 'button', disabled: accountLocked, onClick: () => { setRenaming(account.id); setAccountName(account.name); setRemoving(null); } }, '重命名'), h('button', { type: 'button', disabled: accountLocked, 'aria-label': `${account.enabled ? '停用' : '启用'} ${account.name}`, onClick: () => void manageAccount('account/update', { id: account.id, enabled: !account.enabled }) }, account.enabled ? '停用' : '启用'), h('button', { type: 'button', disabled: accountLocked, onClick: () => void authenticate('start', account.id) }, '重新授权'), h('button', { type: 'button', disabled: accountLocked, onClick: () => void manageAccount('account/refresh', { id: account.id }) }, '刷新'), h('button', { type: 'button', disabled: accountLocked, onClick: () => { setRemoving(account.id); setRenaming(null); } }, '删除'))), quotaView(account.quota), renaming === account.id ? h('div', { style: row }, h('label', { style: { ...field, flex: '1 1 160px' } }, '账户名称', h('input', { value: accountName, maxLength: 100, disabled: accountLocked, autoComplete: 'off',
         onChange: (event) => setAccountName(event.target.value) })), h('button', { type: 'button', disabled: accountLocked || !accountName.trim(), onClick: () => void manageAccount('account/update', { id: account.id, name: accountName.trim() }) }, '确认重命名'), h('button', { type: 'button', disabled: accountLocked, onClick: () => setRenaming(null) }, '取消重命名')) : null, removing === account.id ? h('div', { role: 'group', 'aria-label': '确认删除账户', style: row }, h('span', null, '删除此账户？'), h('button', { type: 'button', disabled: accountLocked, onClick: () => void manageAccount('account/remove', { id: account.id }) }, '确认删除'), h('button', { type: 'button', disabled: accountLocked, onClick: () => setRemoving(null) }, '保留账户')) : null)), !pool?.accounts.length ? h('div', { style: { color: secondary } }, pool ? '暂无账户，添加账户以在浏览器登录。' : quotaView(status?.account)) : null, h('div', { role: 'status', 'aria-live': 'polite', style: { fontSize: '12px', color: secondary } }, authBusy ? '登录操作中…' : authNotice), authError ? h('p', { role: 'alert' }, authError) : null, authFlow ? h('div', { style: { marginTop: '8px' } }, authFlow.verificationUri ? h('a', { href: authFlow.verificationUri, target: '_blank', rel: 'noopener noreferrer', style: { margin: '0 0 8px' } }, '打开浏览器登录')
@@ -438,7 +485,7 @@ function SettingsPanel() {
                 hiddenModels: !enabled ? draft.hiddenModels.filter(hidden => hidden !== id) : [...new Set([...draft.hiddenModels, id])],
                 defaultModel: enabled && draft.defaultModel === id ? enabledModels.find(model => model !== id) ?? '' : draft.defaultModel }) }, label);
     })), h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '12px' } }, h('label', { style: field }, '默认模型', h('select', { value: draft.defaultModel, onChange: (event) => update({ defaultModel: event.target.value }) }, h('option', { value: '', disabled: true }, '请选择默认模型'), !validDefault && draft.defaultModel ? h('option', { value: draft.defaultModel, disabled: true }, `${draft.defaultModel}（已禁用，请重选）`) : null, ...enabledModels.map(id => h('option', { key: id, value: id }, models.get(id))))), h('label', { style: field }, '权限模式', h('select', { value: draft.permissionMode, onChange: (event) => update({ permissionMode: event.target.value }) }, !validMode ? h('option', { value: draft.permissionMode, disabled: true }, `未知模式：${draft.permissionMode}`) : null, h('option', { value: 'dontAsk' }, '不询问'), h('option', { value: 'plan' }, '规划模式'), h('option', { value: 'acceptEdits' }, '接受编辑'))), h('label', { style: field }, '默认推理强度', h('select', { value: draft.reasoningEffort, onChange: (event) => update({ reasoningEffort: event.target.value }) }, ...efforts.map(effort => h('option', { key: effort, value: effort }, effort))))), h('div', { style: { ...row, justifyContent: 'space-between' } }, h('div', { style: row }, h('label', { style: { ...row, gap: '4px' } }, h('input', { type: 'checkbox', name: 'dangerouslySkipPermissions', checked: draft.dangerouslySkipPermissions,
-        onChange: (event) => update({ dangerouslySkipPermissions: event.target.checked }) }), '跳过 CLI 权限检查'), help('danger', '跳过 CLI 权限检查风险说明', dangerHelp, '危险')), h('button', { type: 'button', disabled: locked || !validDefault || !validMode || !validEffort, onClick: () => void load('config', draft) }, '保存设置')), !validDefault || !validMode || !validEffort ? h('p', { role: 'alert' }, '请选择有效的权限模式、推理强度与已启用的默认模型。') : null) : null, h('details', { style: box, 'aria-label': '运行记录' }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `运行记录（${status?.runs.length ?? 0}）`), h('p', { style: { fontSize: '12px' } }, '当前进程内存最近 5 条，每 2 秒刷新；不保存提示词或原始输出。'), h('div', { style: { maxHeight: '360px', overflowY: 'auto' } }, ...(status?.runs.length ? status.runs.map(renderRun) : [h('p', null, '暂无运行记录')]))));
+        onChange: (event) => update({ dangerouslySkipPermissions: event.target.checked }) }), '跳过 CLI 权限检查'), help('danger', '跳过 CLI 权限检查风险说明', dangerHelp, '危险')), h('button', { type: 'button', disabled: locked || !!status?.settingsError || !validDefault || !validMode || !validEffort, onClick: () => void load('config', draft) }, '保存设置')), !validDefault || !validMode || !validEffort ? h('p', { role: 'alert' }, '请选择有效的权限模式、推理强度与已启用的默认模型。') : null) : null, h('details', { style: box, 'aria-label': '运行记录' }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `运行记录（${status?.runs.length ?? 0}）`), h('p', { style: { fontSize: '12px' } }, '当前进程内存最近 5 条，每 2 秒刷新；不保存提示词或原始输出。'), h('div', { style: { maxHeight: '360px', overflowY: 'auto' } }, ...(status?.runs.length ? status.runs.map(renderRun) : [h('p', null, '暂无运行记录')]))));
 }
 function apply(ctx) {
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'codebuddy-link', order: 20, label: 'CodeBuddy' }, SettingsPanel));

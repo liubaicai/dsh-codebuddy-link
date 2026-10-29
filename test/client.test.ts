@@ -112,6 +112,10 @@ function control(tree: Element, label: string, type: string): Element {
   return nodes(parent).find(node => node.type === type)!;
 }
 const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+function deferred() {
+  let release!: () => void;
+  return {wait:new Promise<void>(resolve => {release = resolve;}), release:() => release()};
+}
 
 function accountRow(tree: Element, name = '主账户'): Element {
   return nodes(tree).find(node => node.props['aria-label'] === `账户 ${name}`)!;
@@ -180,6 +184,7 @@ test('safety and danger help are real hover and focus tooltips, dismissible with
   trigger.props.onFocus();
   let tree = app.render(); let tooltip = nodes(tree).find(node => node.props.role === 'tooltip')!;
   assert.match(content(tooltip), /ACP 原生工具绕过 DSH 文件沙箱与确认流程/);
+  assert.match(content(tooltip), /继承含凭据的环境变量或读取当前用户的文件/);
   assert.equal(findHelp('模型与独立委派安全说明').props['aria-describedby'], tooltip.props.id);
   trigger.props.onKeyDown({key:'Escape'}); assert.equal(nodes(app.render()).filter(node => node.props.role === 'tooltip').length, 0);
   trigger.props.onBlur();
@@ -315,6 +320,101 @@ test('status parsing whitelists nested account and run data, rejecting malformed
   }
 });
 
+const recoveryBanner = 'CodeBuddy 配置无法加载，模型调用已停用。请修复插件 settings.json 或管理员配置后重启 DSH；原文件未修改。';
+const recoveryPayload = () => ({...payload(), config:{...payload().config, enabled:false}, settingsError:'PRIVATE-SETTINGS-PATH-AND-CREDENTIAL'});
+
+test('settings recovery shows a fixed private banner and blocks save independently of notices and edits', async () => {
+  const app = mounted([{value:recoveryPayload()}, {value:recoveryPayload()}, {value:recoveryPayload()}, {ok:false, status:503}]);
+  app.render(); await settle(); let tree = app.render();
+  assert.equal(app.state[0].settingsError, true);
+  assert.ok(nodes(tree).some(node => node.props.role === 'alert' && content(node) === recoveryBanner));
+  assert.equal(button(tree, '保存设置').props.disabled, true);
+  const count = app.calls.length;
+  button(tree, '保存设置').props.onClick(); await settle(); assert.equal(app.calls.length, count);
+  button(tree, '刷新账户').props.onClick(); await settle();
+  assert.match(content(app.render()), /账户状态已刷新/);
+  control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+  tree = app.render(); assert.ok(content(tree).includes(recoveryBanner)); assert.doesNotMatch(content(tree), /账户状态已刷新/);
+  button(tree, '获取模型列表').props.onClick(); await settle(); tree = app.render();
+  assert.match(content(tree), /HTTP 503/); assert.ok(content(tree).includes(recoveryBanner));
+  button(tree, '保存设置').props.onClick(); await settle();
+  assert.ok(app.calls.every(call => !/\/(?:config|reset)$/.test(call.url)));
+  assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/); assert.doesNotMatch(JSON.stringify(tree), /PRIVATE-/);
+});
+
+test('recovery status immediately guards captured save handlers and malformed polls cannot clear it', async () => {
+  const app = mounted([{value:payload()}, {value:recoveryPayload()}, {value:{...payload(), settingsError:false}}, {value:{...payload(), settingsError:''}}]);
+  app.render(); await settle(); const capturedSave = button(app.render(), '保存设置').props.onClick;
+  app.tick(); await settle(); capturedSave(); await settle();
+  assert.equal(app.calls.length, 4); assert.equal(button(app.render(), '保存设置').props.disabled, true);
+  app.tick(); await settle(); capturedSave(); await settle();
+  assert.equal(app.calls.length, 5); assert.ok(content(app.render()).includes(recoveryBanner));
+  app.tick(); await settle();
+  assert.equal(app.state[0].settingsError, false); assert.equal(button(app.render(), '保存设置').props.disabled, false);
+  assert.ok(!content(app.render()).includes(recoveryBanner));
+});
+
+test('settings recovery flag accepts only absent or string fields and never retains arbitrary text', async () => {
+  for (const value of ['', ' ', 'PRIVATE-SETTINGS']) {
+    const app = mounted([{value:{...payload(), settingsError:value}}]); app.render(); await settle();
+    assert.equal(app.state[0].settingsError, value.length > 0);
+    assert.equal(button(app.render(), '保存设置').props.disabled, value.length > 0);
+    assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-SETTINGS/);
+  }
+  for (const settingsError of [null, true, false, 1, {}, []]) {
+    const app = harness([{value:{...payload(), settingsError}}]); app.render(); await settle();
+    assert.match(content(app.render()), /服务端状态格式无效/); assert.equal(app.calls.length, 1);
+    assert.equal(button(app.render(), '保存设置'), undefined);
+  }
+});
+
+const unsafeModelIds = ['', 'https://example.com/model', 'file:///tmp/model', '/tmp/model', './model', '../model',
+  'C:/model', 'C:\\model', 'C:model', 'provider/name/extra', 'provider//name', 'provider/../name',
+  'provider:/name', 'model\n', 'model\r', 'model\t', 'model\u0000', 'model\u007f', 'model name'];
+
+test('config and all catalog model IDs use bare request validation through 256 characters', async () => {
+  const values = [...[128,129,256,257].map(length => 'm'.repeat(length)), 'model:version-1.2_3', 'provider/name', ...unsafeModelIds];
+  for (const id of values) {
+    const valid = (id.startsWith('m') && /^m+$/.test(id) && id.length <= 256) || id === 'model:version-1.2_3';
+    const base = payload();
+    const responses = [
+      {...base, config:{...base.config, models:[id]}},
+      {...base, config:{...base.config, hiddenModels:[id]}},
+      {...base, config:{...base.config, defaultModel:id}},
+      {...base, catalogModels:[{id, name:'Model'}]},
+      {...base, accountPool:{...base.accountPool, accounts:[{...base.accountPool.accounts[0]!, catalogModels:[{id, name:'Model'}]}]}},
+    ];
+    for (const [source, response] of responses.entries()) {
+      const app = valid ? mounted([{value:response}]) : harness([{value:response}]); app.render(); await settle();
+      assert.equal(app.state[0] !== null, valid, `${source}: ${JSON.stringify(id)}`);
+      if (!valid) {
+        assert.match(content(app.render()), /服务端状态格式无效/); assert.equal(app.calls.length, 1);
+        assert.equal(button(app.render(), '保存设置'), undefined);
+      }
+    }
+  }
+});
+
+test('run model metadata distinguishes bare requests from returned provider/name at 128/129/256/257', async () => {
+  const values = [
+    ...[128,129,256,257].flatMap(length => [
+      {id:'m'.repeat(length), request:length <= 256, returned:length <= 256},
+      {id:`provider/${'m'.repeat(length - 9)}`, request:false, returned:length <= 256},
+    ]),
+    {id:'model:version-1.2_3', request:true, returned:true},
+    {id:'provider/name', request:false, returned:true},
+    ...unsafeModelIds.map(id => ({id, request:false, returned:false})),
+  ];
+  for (const {id, request, returned} of values) {
+    const run = {id:'run', source:'model', state:'completed', queuedAt:1, requestedModel:id, returnedModel:id, requestedEffort:'high'};
+    const app = mounted([{value:{...payload(), runs:[run]}}]); app.render(); await settle();
+    assert.equal(app.state[0].runs[0].requestedModel, request ? id : 'unknown', JSON.stringify(id));
+    assert.equal(app.state[0].runs[0].returnedModel, returned ? id : undefined, JSON.stringify(id));
+    const history = nodes(app.render()).find(node => node.props['aria-label'] === '运行记录')!;
+    assert.ok(content(history).includes(`请求模型：${request ? id : 'unknown'}；返回模型：${returned ? id : '未知'}`));
+  }
+});
+
 test('HTTP and network errors are private and preserve unsaved edits', async () => {
   const app = mounted([{value:payload()}, {ok:false, status:403, value:{error:'PRIVATE-TOKEN'}}, {error:new Error('PRIVATE-NETWORK')}]);
   app.render(); await settle(); control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
@@ -416,18 +516,128 @@ test('run records default collapsed, cap latest five, include account name, and 
   assert.doesNotMatch(JSON.stringify(app.state), /PRIVATE-/); assert.doesNotMatch(content(tree), /·/);
 });
 
-test('two-second status polling preserves drafts, coalesces loads and ignores late results after unmount', async () => {
-  let release!: () => void; const wait = new Promise<void>(resolve => {release = resolve;});
-  const app = mounted([{value:payload()}, {value:{...payload(), config:{...payload().config, permissionMode:'acceptEdits'}}, wait}]);
+test('two-second status polling preserves drafts, coalesces reads and ignores late results after unmount', async () => {
+  const poll = deferred();
+  const app = mounted([{value:payload()}, {value:{...payload(), config:{...payload().config, permissionMode:'acceptEdits'}}, wait:poll.wait}]);
   app.render(); await settle(); control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
-  app.tick(); app.tick(); button(app.render(), '刷新账户').props.onClick();
+  app.tick(); app.tick();
+  assert.equal(button(app.render(), '刷新账户').props.disabled, false);
   assert.equal(app.calls.length, 4); assert.equal(app.calls[3]!.url, '/plugins/codebuddy-link/status');
-  release(); await settle(); assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+  poll.release(); await settle(); assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+  assert.equal(app.state[0].config.permissionMode, 'acceptEdits');
   app.cleanup.forEach(dispose => dispose()); app.tick(); assert.equal(app.calls.length, 4);
-  let finish!: () => void; const gate = new Promise<void>(resolve => {finish = resolve;});
-  const late = mounted([{value:payload()}, {value:withQuota({status:'ok', remaining:123}), wait:gate}]);
-  late.render(); await settle(); late.tick(); const before = late.state[0];
-  late.cleanup.forEach(dispose => dispose()); finish(); await settle(); assert.equal(late.state[0], before);
+  const latePoll = deferred();
+  const late = mounted([{value:payload()}, {value:withQuota({status:'ok', remaining:123}), wait:latePoll.wait}]);
+  late.render(); await settle(); late.tick();
+  late.cleanup.forEach(dispose => dispose()); const before = JSON.stringify(late.state);
+  latePoll.release(); await settle(); assert.equal(JSON.stringify(late.state), before);
+});
+
+test('enabled save, refresh, model, account and login clicks reserve the lock and wait for polling', async () => {
+  for (const action of ['save', 'refresh', 'models', 'account', 'login']) {
+    const poll = deferred(); const operation = deferred(); const discovery = deferred();
+    const saved = {...payload(), config:{...payload().config, permissionMode:'plan'}};
+    const endpoint = {save:'config', refresh:'refresh', models:'models', account:'account/update', login:'auth/start'}[action]!;
+    const app = mounted([{value:payload()}, {value:withQuota({status:'ok', remaining:999}), wait:poll.wait},
+      {value:action === 'login' ? startReply() : saved, wait:operation.wait}, {value:saved, wait:discovery.wait}]);
+    app.render(); await settle();
+    control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+    app.tick(); app.tick(); const before = app.state[0];
+    const tree = app.render();
+    const click = action === 'account' ? button(accountRow(tree), '停用')
+      : button(tree, {save:'保存设置', refresh:'刷新账户', models:'获取模型列表', login:'添加账户'}[action]!);
+    assert.equal(click.props.disabled, false, action);
+    click.props.onClick(); click.props.onClick();
+    // Even handlers captured before the lock cannot start a competing mutation.
+    button(tree, '保存设置').props.onClick(); button(tree, '刷新账户').props.onClick();
+    button(tree, '添加账户').props.onClick(); button(accountRow(tree), '停用').props.onClick(); app.tick();
+    assert.equal(app.calls.length, 4, action);
+    assert.equal(button(app.render(), '保存设置').props.disabled, true, action);
+    assert.match(content(app.render()), action === 'login' ? /登录操作中/ : action === 'save' ? /保存中/ : action === 'refresh' ? /刷新中/ : action === 'account' ? /更新中/ : /加载中/);
+    poll.release(); await settle();
+    assert.equal(app.calls.length, 5, action);
+    assert.equal(app.calls[4]!.url, `/plugins/codebuddy-link/${endpoint}`);
+    assert.equal(app.state[0], before, 'superseded poll cannot publish its stale snapshot');
+    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+    if (action === 'save') assert.equal(JSON.parse(app.calls[4]!.init.body).permissionMode, 'plan');
+    if (action === 'account') assert.deepEqual(JSON.parse(app.calls[4]!.init.body), {id:'account-1', enabled:false});
+    app.tick(); button(tree, '添加账户').props.onClick(); assert.equal(app.calls.length, 5);
+    operation.release(); await settle();
+    if (action === 'refresh') {
+      assert.equal(app.calls[5]!.url, '/plugins/codebuddy-link/models');
+      app.tick(); button(tree, '保存设置').props.onClick(); assert.equal(app.calls.length, 6);
+      assert.equal(button(app.render(), '保存设置').props.disabled, true);
+      discovery.release(); await settle();
+    }
+    assert.equal(button(app.render(), '保存设置').props.disabled, false, action);
+    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+    assert.match(content(app.render()), action === 'login' ? /官方页面授权/ : action === 'save' ? /设置已保存/ : action === 'refresh' ? /账户状态已刷新/ : action === 'account' ? /账户已更新/ : /CodeBuddy/);
+  }
+});
+
+test('manual login check and cancellation wait for status polls without losing their flow', async () => {
+  for (const action of ['poll', 'cancel']) {
+    const poll = deferred();
+    const app = mounted([{value:payload()}, {value:startReply()}, {value:payload(), wait:poll.wait},
+      {value:{status:action === 'poll' ? 'ok' : 'cancelled'}}, {value:payload()}, {value:payload()}]);
+    app.render(); await settle(); button(app.render(), '添加账户').props.onClick(); await settle();
+    control(app.render(), '权限模式', 'select').props.onChange({target:{value:'plan'}});
+    app.tick(); const click = button(app.render(), action === 'poll' ? '检查登录结果' : '取消登录');
+    assert.equal(click.props.disabled, false); click.props.onClick(); app.tick(); assert.equal(app.calls.length, 5);
+    poll.release(); await settle();
+    assert.equal(app.calls[5]!.url, `/plugins/codebuddy-link/auth/${action}`);
+    assert.deepEqual(JSON.parse(app.calls[5]!.init.body), {flowId:'private-flow-id'});
+    assert.equal(nodes(app.render()).filter(node => node.type === 'a').length, 0);
+    assert.equal(app.calls.length, action === 'poll' ? 8 : 6);
+    assert.equal(control(app.render(), '权限模式', 'select').props.value, 'plan');
+  }
+});
+
+test('failed status polls release waiting save, refresh and login operations without leaking errors', async () => {
+  for (const failure of [{error:new Error('PRIVATE-POLL')}, {ok:false, status:503}, {value:{invalid:true}}]) {
+    for (const [label, endpoint] of [['保存设置', 'config'], ['刷新账户', 'refresh'], ['添加账户', 'auth/start']]) {
+      const poll = deferred();
+      const app = mounted([{value:payload()}, {...failure, wait:poll.wait},
+        {value:endpoint === 'auth/start' ? startReply() : payload()}, {value:payload()}]);
+      app.render(); await settle(); app.tick(); button(app.render(), label!).props.onClick();
+      assert.equal(app.calls.length, 4); poll.release(); await settle();
+      assert.equal(app.calls[4]!.url, `/plugins/codebuddy-link/${endpoint}`);
+      assert.equal(app.calls.length, endpoint === 'refresh' ? 6 : 5);
+      assert.equal(button(app.render(), '保存设置').props.disabled, false);
+      assert.doesNotMatch(content(app.render()), /PRIVATE-|HTTP 503|服务端状态格式无效|请求失败/);
+    }
+  }
+});
+
+test('disposal cancels operations waiting for a poll, including when the poll fails', async () => {
+  for (const failed of [false, true]) {
+    for (const label of ['保存设置', '刷新账户', '添加账户', '停用']) {
+      const poll = deferred();
+      const app = mounted([{value:payload()}, {value:payload(), ...(failed ? {error:new Error('PRIVATE-POLL')} : {}), wait:poll.wait}]);
+      app.render(); await settle(); app.tick(); button(app.render(), label).props.onClick();
+      app.cleanup.forEach(dispose => dispose()); const before = JSON.stringify(app.state);
+      poll.release(); await settle(); app.tick();
+      assert.equal(app.calls.length, 4, label); assert.equal(app.timers.size, 0);
+      assert.equal(JSON.stringify(app.state), before, label);
+    }
+  }
+});
+
+test('a stale poll and waiting operation cannot publish or unlock a remounted generation', async () => {
+  for (const label of ['保存设置', '刷新账户', '添加账户', '停用']) {
+    const oldPoll = deferred(); const newPoll = deferred();
+    const app = mounted([{value:payload()}, {value:withQuota({status:'ok', remaining:999}), wait:oldPoll.wait},
+      {value:payload()}, {value:payload()}, {value:payload()}, {value:payload(), wait:newPoll.wait}, {value:payload()}]);
+    app.render(); await settle(); app.tick(); button(app.render(), label).props.onClick();
+    app.remount(); await settle(); app.tick(); assert.equal(app.calls.length, 8);
+    const before = JSON.stringify(app.state); oldPoll.release(); await settle(); app.tick();
+    assert.equal(JSON.stringify(app.state), before); assert.equal(app.calls.length, 8);
+    // The old poll's finally must not clear the new generation's poll promise.
+    button(app.render(), '保存设置').props.onClick(); assert.equal(app.calls.length, 8);
+    newPoll.release(); await settle(); assert.equal(app.calls.length, 9);
+    assert.equal(app.calls[8]!.url, '/plugins/codebuddy-link/config');
+    assert.equal(button(app.render(), '保存设置').props.disabled, false);
+  }
 });
 
 test('runtime polling and auth requests never overlap or poll OAuth automatically', async () => {

@@ -1,3 +1,4 @@
+import { isRequestModelIdentifier } from "./model-id.js";
 export const CODEBUDDY_EFFORTS = ['auto', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultracode'];
 export function isCodeBuddyEffort(value) {
     return typeof value === 'string' && CODEBUDDY_EFFORTS.includes(value);
@@ -37,21 +38,28 @@ export function resolveConfig(entry = {}, env = process.env) {
     const mode = string('permissionMode', 'DSH_CODEBUDDY_MODE', 'dontAsk');
     if (mode !== 'dontAsk' && mode !== 'plan' && mode !== 'acceptEdits')
         throw new Error('permissionMode must be dontAsk, plan or acceptEdits');
-    const model = string('defaultModel', 'DSH_CODEBUDDY_DEFAULT_MODEL', 'default') || 'default';
+    const modelValue = value('defaultModel', 'DSH_CODEBUDDY_DEFAULT_MODEL', 'default');
+    if (typeof modelValue !== 'string')
+        throw new Error('defaultModel must be a string');
+    if (/[\x00-\x1f\x7f]/.test(modelValue))
+        throw new Error('Invalid model id');
+    const model = modelValue.trim() || 'default';
     const rawModels = value('models', 'DSH_CODEBUDDY_MODELS', '');
     if (!Array.isArray(rawModels) && typeof rawModels !== 'string')
         throw new Error('models must be an array or comma-separated string');
     const models = Array.isArray(rawModels) ? rawModels : rawModels.split(',');
     const hidden = value('hiddenModels', 'DSH_CODEBUDDY_HIDDEN_MODELS', []);
     const hiddenModels = Array.isArray(hidden) ? hidden : typeof hidden === 'string' ? hidden.split(',').filter(Boolean) : null;
-    if (!hiddenModels || hiddenModels.some(v => typeof v !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(v)))
+    if (!hiddenModels || hiddenModels.some(v => !isRequestModelIdentifier(v)))
         throw new Error('Invalid hiddenModels');
     const cleanModels = [...new Set(['default', model, ...models].map(v => {
             if (typeof v !== 'string')
                 throw new Error('models must contain strings');
+            if (/[\x00-\x1f\x7f]/.test(v))
+                throw new Error('Invalid model id');
             return v.trim();
         }).filter(Boolean))];
-    if (cleanModels.some(v => !/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(v)))
+    if (cleanModels.some(v => !isRequestModelIdentifier(v)))
         throw new Error('Invalid model id');
     const rawModelContext = value('modelContext', 'DSH_CODEBUDDY_MODEL_CONTEXT', {});
     const modelContextSource = typeof rawModelContext === 'string' ? JSON.parse(rawModelContext) : rawModelContext;
@@ -59,7 +67,7 @@ export function resolveConfig(entry = {}, env = process.env) {
         throw new Error('modelContext must be an object');
     const modelContext = {};
     for (const [id, window] of Object.entries(modelContextSource)) {
-        if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(id))
+        if (!isRequestModelIdentifier(id))
             throw new Error('Invalid modelContext id');
         const size = Number(window);
         if (!Number.isSafeInteger(size) || size <= 0)

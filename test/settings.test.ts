@@ -60,6 +60,42 @@ test('runtime settings persist atomically and invalid updates leave live and sav
   } finally { rmSync(dir, {recursive:true, force:true}) }
 })
 
+test('invalid saved settings preserve the original and disable execution without losing recovery status', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-settings-recovery-'))
+  const path = join(dir, 'settings.json')
+  try {
+    for (const original of ['{broken PRIVATE', '[]', '{"unknown-PRIVATE":true}', '{"codebuddyBin":"PRIVATE"}', '{"permissionMode":"unsafe"}', '{"models":["bad/path"]}']) {
+      writeFileSync(path, original)
+      const store = new SettingsStore({enabled:true, askTool:true, tools:'all', dangerouslySkipPermissions:true}, path)
+      assert.match(store.loadError!, /disabled.*Repair.*restart/)
+      assert.doesNotMatch(store.loadError!, /PRIVATE|unsafe/)
+      assert.equal(store.config.enabled, false); assert.equal(store.config.askTool, false)
+      assert.equal(store.config.tools, ''); assert.equal(store.config.dangerouslySkipPermissions, false)
+      assert.throws(() => store.update({permissionMode:'plan'}), /Repair/)
+      assert.equal(readFileSync(path, 'utf8'), original)
+    }
+    const routes = new Map<string, Parameters<WebServerLike['register']>[0]['handler']>()
+    const store = new SettingsStore({}, path)
+    let changed = false
+    const dispose = registerSettingsRoutes({register(route){routes.set(route.path,route.handler)}}, store, () => {changed=true})
+    const server = createServer((req,res) => routes.get(req.url!)!(req,res))
+    await new Promise<void>(resolve => server.listen(0,'127.0.0.1',resolve))
+    const base = `http://127.0.0.1:${(server.address() as {port:number}).port}/plugins/codebuddy-link/`
+    try {
+      const response = await fetch(base+'status')
+      assert.equal(response.status, 200)
+      const status = await response.json() as {settingsError:string;config:{enabled:boolean}}
+      assert.match(status.settingsError, /Repair/); assert.equal(status.config.enabled,false)
+      assert.equal((await fetch(base+'config',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).status,400)
+      assert.equal(changed,false)
+    } finally { dispose();server.closeAllConnections();await new Promise<void>(resolve => server.close(() => resolve())) }
+    writeFileSync(path, '{"permissionMode":"plan"}')
+    assert.equal(new SettingsStore({},path).loadError, undefined)
+    assert.equal(new SettingsStore({},path).config.enabled, true)
+    assert.equal(new SettingsStore({},path).config.permissionMode, 'plan')
+  } finally { rmSync(dir,{recursive:true,force:true}) }
+})
+
 test('auth HTTP routes enforce same origin, remove JSON import, and never echo secrets', async () => {
   const dir = mkdtempSync(join(tmpdir(),'cb-auth-http-'))
   const routes = new Map<string, Parameters<WebServerLike['register']>[0]['handler']>()

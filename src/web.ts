@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { SettingsStore } from './settings.ts'
 import { isModelIdentifier } from './metadata.ts'
+import { isRequestModelIdentifier } from './model-id.ts'
 import { isCodeBuddyEffort } from './config.ts'
 import type { AccountService } from './account-service.ts'
 
@@ -35,6 +36,7 @@ export function registerSettingsRoutes(server: WebServerLike, store: SettingsSto
   let modelMessage = ''
   const resetAccount = () => { generation++; pending = undefined; modelPending = undefined; catalog = []; modelMessage = ''; accounts?.changed(); notify(); account = {status:'unavailable',message:'账户已更新，请刷新积分。'} }
   const snapshot = async () => ({
+    ...(store.loadError ? {settingsError:store.loadError} : {}),
     modelMessage,
     ...(accounts ? {accountPool: accounts.snapshot()} : {}),
     auth: auth ? await auth.status() : {configured:false},
@@ -136,7 +138,7 @@ function publicRuns(values: unknown[]): Record<string, unknown>[] {
       || typeof run.requestedModel !== 'string' || typeof run.requestedEffort !== 'string'
       || typeof run.queuedAt !== 'number' || !Number.isFinite(run.queuedAt)) continue
     const clean: Record<string, unknown> = {id:run.id, source:run.source, state:run.state,
-      requestedModel:isModelIdentifier(run.requestedModel) ? run.requestedModel : 'unknown', requestedEffort:isCodeBuddyEffort(run.requestedEffort) ? run.requestedEffort : 'auto', queuedAt:run.queuedAt,
+      requestedModel:isRequestModelIdentifier(run.requestedModel) ? run.requestedModel : 'unknown', requestedEffort:isCodeBuddyEffort(run.requestedEffort) ? run.requestedEffort : 'auto', queuedAt:run.queuedAt,
       contextOverrideSent:false, reasoningConfirmed:false, warning:run.warning === true,
       queuePosition:Number.isSafeInteger(run.queuePosition) && Number(run.queuePosition) >= 0 ? run.queuePosition : 0}
     if (typeof run.accountId === 'string' && /^[a-f0-9]{32}$/.test(run.accountId)) clean.accountId = run.accountId

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { isModelIdentifier as identifier } from './metadata.ts'
+import { isRequestModelIdentifier } from './model-id.ts'
 import { isCodeBuddyEffort, type PluginConfig } from './config.ts'
 import { runCodeBuddy, type CodeBuddyRequest, type BridgeEvent } from './runner.ts'
 import type { AccountLease } from './account-scheduler.ts'
@@ -89,7 +90,8 @@ export class CallRuntime {
   }
   async *run(request: CodeBuddyRequest, source: 'model' | 'ask', runner: typeof runCodeBuddy = runCodeBuddy,
     validate?: (event: Extract<BridgeEvent, { type: 'result' }>) => void): AsyncGenerator<BridgeEvent> {
-    const requestedModel = identifier(request.model) ? request.model : 'default'
+    if (request.model !== undefined && !isRequestModelIdentifier(request.model)) throw new Error('Invalid CodeBuddy request model id')
+    const requestedModel = request.model ?? 'default'
     const modelContext = requestedModel !== 'default' ? this.config.modelContext[requestedModel] : undefined
     const record: RunSnapshot = {
       id: randomUUID(), source, state: 'queued', requestedModel,

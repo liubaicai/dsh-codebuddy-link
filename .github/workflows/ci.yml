@@ -39,7 +39,8 @@ jobs:
           cd .release-smoke
           printf '%s\n' '{"name":"release-smoke","private":true}' > package.json
           npm install --ignore-scripts --omit=dev --no-audit --no-fund "git+$source#$revision"
-          node --input-type=module -e 'const p = await import("./node_modules/dsh-codebuddy-link/dist/prompt.js"); if (p.parseResponse({text:"ok"}, []).text !== "ok") process.exit(1); await import("dsh-codebuddy-link");'
+          node --input-type=module -e 'await import("dsh-codebuddy-link");'
+          node node_modules/dsh-codebuddy-link/scripts/verify-package.mjs
       - uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.os }}-node-${{ matrix.node }}

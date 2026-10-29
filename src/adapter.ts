@@ -58,6 +58,9 @@ export class CodeBuddyAdapter extends LlmAdapter {
     let open: 'text' | 'reasoning' | undefined
     let accumulated = ''
     let rawText = ''
+    // Keep a small live preview, not a second full copy of a long final answer.
+    let previewRemaining = 1024
+    let previewTruncated = false
     let resultText = ''
     let usage: TokenUsage | undefined
     let sessionId: string | undefined
@@ -94,7 +97,18 @@ export class CodeBuddyAdapter extends LlmAdapter {
       }, 'model', this.runner ?? (autonomous ? runCodeBuddyAcp : runCodeBuddy))) {
         if (event.type === 'text') {
           rawText += event.delta
-          yield* append(autonomous ? 'reasoning' : 'text', event.delta)
+          if (!autonomous) yield* append('text', event.delta)
+          else {
+            let end = Math.min(event.delta.length, previewRemaining)
+            // Do not split a UTF-16 surrogate pair at the preview boundary.
+            if (end > 0 && (end < event.delta.length || end === previewRemaining) && /[\uD800-\uDBFF]/.test(event.delta[end - 1]!)) end--
+            if (end) yield* append('reasoning', event.delta.slice(0, end))
+            previewRemaining -= end
+            if (end < event.delta.length && !previewTruncated) {
+              previewRemaining = 0; previewTruncated = true
+              yield* append('reasoning', '\n[CodeBuddy 正在生成，完整内容将在完成后显示]\n')
+            }
+          }
         } else if (event.type === 'reasoning') yield* append('reasoning', event.delta)
         else if (autonomous && (event.type === 'tool-start' || event.type === 'tool-end')) {
           // Progress only: never replay a native CLI operation as a DSH tool call,

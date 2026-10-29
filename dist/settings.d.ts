@@ -6,6 +6,8 @@ export declare class SettingsStore {
     private saved;
     private readonly entry;
     readonly path: string;
+    /** A diagnostic-only configuration keeps recovery routes available, never execution. */
+    readonly loadError?: string;
     constructor(entry?: Record<string, unknown>, path?: string);
     update(patch: unknown): PluginConfig;
 }

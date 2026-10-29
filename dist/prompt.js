@@ -1,3 +1,4 @@
+/** @deprecated Legacy parser compatibility only; provider replies are opaque ACP output. */
 export { parseResponse } from "./response.js";
 import { strictJson } from "./json.js";
 /** Wire instructions belong outside the quoted conversation, at system priority. */

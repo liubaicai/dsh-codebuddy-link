@@ -20,6 +20,18 @@ function mock(values: unknown[], status = 200, international: unknown = { code: 
   }
   return { fetch, calls }
 }
+test('version rejection does not trigger credential retry or echo upstream details', async () => {
+  for (const status of [200,400]) {
+    const api = mock([{code:12403,message:'PRIVATE rejected version'}],status)
+    let credentialReads = 0
+    const value = await createModelDiscoverer({fetch:api.fetch,packageFallback:false,readCredentials:async () => {credentialReads++;return undefined}})()
+    assert.notEqual(value.status,'ok'); assert.deepEqual(value.models,[])
+    assert.equal(api.calls.length,1); assert.equal(credentialReads,0)
+    assert.equal(new Headers(api.calls[0]!.init.headers).get('user-agent'),'CLI/2.63.2 CodeBuddy/2.63.2')
+    assert.doesNotMatch(JSON.stringify(value),/PRIVATE/)
+  }
+})
+
 test('parseContextRegistry projects provider-qualified ids and keeps only safe integer windows', () => {
   const registry = parseContextRegistry({
     openai: { models: { 'openai/gpt-x': { limit: { context: 100000 } } } },
@@ -66,6 +78,25 @@ test('only authoritative CLI membership plus definitions is projected and dedupl
   assert.deepEqual(parseModelConfiguration({ ...configuration, models: [{ id: 'fixture-model', hidden: true }] }), [])
   assert.deepEqual(parseModelConfiguration({ ...configuration, models: Array(1001).fill(configuration.models[0]) }), [])
 })
+test('discovery shares request ID boundaries and never admits provider paths or trailing controls', () => {
+  const accepted = [128, 129, 256].map(length => 'm'.repeat(length))
+  const rejected = ['m'.repeat(257), 'provider/model', 'https://host/model', '/tmp/model', '../model', 'C:\\model', 'C:model', 'bad\n', 'bad\r', 'bad\t', 'bad\0']
+  const ids = [...accepted, ...rejected]
+  const definitions = ids.map(id => ({ id, name: 'Fixture' }))
+  const catalog = (models: unknown[], members: string[]) => ({ models, agents: [{ name: 'cli', models: members }] })
+  assert.deepEqual(parseModelConfiguration(catalog(definitions, ids)).map(model => model.id), accepted)
+  // Validate both the definitions and the membership, not just their intersection.
+  for (const id of rejected) assert.deepEqual(parseModelConfiguration(catalog([{ id }], [id])), [])
+})
+
+test('context registry validates bounded returned IDs before projecting bare names', () => {
+  const accepted = [128, 129, 256].map(length => 'm'.repeat(length))
+  const qualified = [128, 129, 256].map(length => `vendor/${'q'.repeat(length - 7)}`)
+  const rejected = ['m'.repeat(257), `vendor/${'q'.repeat(250)}`, 'https://host/model', '/tmp/model', '../model', 'a/b/model', 'C:/model', 'C:model', 'vendor/model\n']
+  const registry = parseContextRegistry({ fixture: { models: [...accepted, ...qualified, ...rejected].map(id => ({ id, limit: { context: 123456 } })) } })
+  assert.deepEqual([...registry.keys()], [...accepted, ...qualified.map(id => id.split('/')[1])])
+})
+
 test('anonymous official configuration works without touching injected credentials', async () => {
   const api = mock([payload])
   const result = await createModelDiscoverer({ fetch: api.fetch, readCredentials: async () => { throw Error('must not read') }, now: () => new Date('2026-01-01T00:00:00Z') })()
@@ -90,6 +121,7 @@ test('empty anonymous config retries only with explicit validated server-side cr
   assert.equal(api.calls.length, 2)
   assert.equal(new Headers(api.calls[1]!.init.headers).get('authorization'), 'Bearer fictional-secret')
   assert.equal(new Headers(api.calls[1]!.init.headers).get('x-user-id'), 'fixture-user')
+  assert.equal(new Headers(api.calls[1]!.init.headers).get('user-agent'), 'CLI/2.63.2 CodeBuddy/2.63.2')
   assert.ok(!JSON.stringify(result).includes('fictional-secret'))
 })
 test('unsupported credentials and exceptions never echo secrets', async () => {

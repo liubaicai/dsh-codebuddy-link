@@ -36,7 +36,8 @@ jobs:
           cd .release-smoke
           printf '%s\n' '{"name":"release-smoke","private":true}' > package.json
           npm install --ignore-scripts --omit=dev --no-audit --no-fund "$archive"
-          node --input-type=module -e 'await import("dsh-codebuddy-link"); const p=await import("./node_modules/dsh-codebuddy-link/dist/prompt.js"); if(p.parseResponse({text:"ok"},[]).text!=="ok") process.exit(1)'
+          node --input-type=module -e 'await import("dsh-codebuddy-link");'
+          node node_modules/dsh-codebuddy-link/scripts/verify-package.mjs
       - name: Publish release and checksum
         env:
           GH_TOKEN: ${{ github.token }}

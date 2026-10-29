@@ -1,14 +1,15 @@
 import { open, realpath } from 'node:fs/promises';
 import { basename, delimiter, dirname, isAbsolute, join } from 'node:path';
 import { parseCredential } from "./auth.js";
+import { CODEBUDDY_COMPAT_USER_AGENT } from "./compatibility.js";
 import { resolveCodeBuddyBin } from "./runner.js";
+import { isRequestModelIdentifier, isReturnedModelIdentifier } from "./model-id.js";
 const CN_ENDPOINT = 'https://www.codebuddy.cn/v3/config';
 const INTERNATIONAL_ENDPOINT = 'https://www.codebuddy.ai/v3/config';
 const MODELS_DEV_ENDPOINT = 'https://models.dev/api.json';
 const LIMIT = 4 * 1024 * 1024;
 const MODELS_DEV_LIMIT = 32 * 1024 * 1024;
 const MAX_MODELS = 1000;
-const ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,255}$/;
 /**
  * Offline snapshot of models.dev limit.context values for official CLI model ids
  * (checked 2026-10-28). Used when models.dev cannot be reached so the context
@@ -31,7 +32,7 @@ export function parseContextRegistry(value) {
     const record = (model) => {
         const limit = object(model?.limit);
         const context = Number(limit?.context);
-        if (!model || typeof model.id !== 'string' || !Number.isSafeInteger(context) || context <= 0 || context > 100_000_000)
+        if (!model || !isReturnedModelIdentifier(model.id) || !Number.isSafeInteger(context) || context <= 0 || context > 100_000_000)
             return;
         // models.dev ids are provider-qualified ("tencent/hy3"); CodeBuddy uses the bare id.
         const id = model.id.split('/').pop().toLowerCase();
@@ -65,12 +66,12 @@ export function parseModelConfiguration(value) {
     const definitions = new Map();
     for (const value of config.models) {
         const model = object(value);
-        if (model && typeof model.id === 'string' && ID.test(model.id) && !definitions.has(model.id))
+        if (model && isRequestModelIdentifier(model.id) && !definitions.has(model.id))
             definitions.set(model.id, model);
     }
     const seen = new Set(), result = [];
     for (const id of cli.models) {
-        if (typeof id !== 'string' || !ID.test(id) || seen.has(id))
+        if (!isRequestModelIdentifier(id) || seen.has(id))
             continue;
         seen.add(id);
         const model = definitions.get(id);
@@ -230,7 +231,7 @@ export function createModelDiscoverer(options = {}) {
                 // parseable CLI version in User-Agent (otherwise HTTP 400 code 12403
                 // "check ua, get coding copilot version error"). Match the official CLI UA
                 // that credits.ts already proved against authenticated CN endpoints.
-                const headers = { Accept: 'application/json', 'X-Product': 'SaaS', 'X-IDE-Type': 'CLI', 'User-Agent': 'CLI/2.63.2 CodeBuddy/2.63.2' };
+                const headers = { Accept: 'application/json', 'X-Product': 'SaaS', 'X-IDE-Type': 'CLI', 'User-Agent': CODEBUDDY_COMPAT_USER_AGENT };
                 if (attempt) {
                     // The injected credential belongs to the CN login flow. Never reuse it
                     // on the international host, even when that host explicitly asks for auth.

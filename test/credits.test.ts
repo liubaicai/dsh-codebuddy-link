@@ -20,6 +20,16 @@ const accounts = (Accounts: unknown[], TotalCount?: number | string) => ({code: 
 const grant = (id: number, total = 100, remaining = 25) => ({ResourceId: `grant-${id}`, PackageCode: 'TCACA_code_009_0XmEQc2xOf', CycleCapacitySizePrecise: String(total), CycleCapacityRemainPrecise: String(remaining)})
 const fullPage = (start = 0) => Array.from({length:100}, (_, index) => grant(start + index))
 
+test('compatibility-version rejection never becomes a quota or credential retry', async () => {
+  for (const status of [200,400]) {
+    const api = mock([{code:12403,message:'PRIVATE version rejected'}],status)
+    const value = await createAccountRefresher({fetch:api.fetch,readCredentials:async () => login})()
+    assert.notEqual(value.status,'ok'); assert.notEqual(value.status,'auth-required')
+    assert.equal(value.remaining,undefined); assert.equal(api.calls.length,1)
+    assert.doesNotMatch(JSON.stringify(value),/PRIVATE/)
+  }
+})
+
 test('explicit credential file is read-only, reread on refresh and bounded', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'cb-credentials-'))
   const path = join(dir, 'session.json')
@@ -53,6 +63,7 @@ test('real Accounts short page terminates without probing a repeated tail and ma
     assert.ok(call.init.signal instanceof AbortSignal)
     assert.equal(new Headers(call.init.headers).get('authorization'), 'Bearer fictional-secret-token')
     assert.equal(new Headers(call.init.headers).get('x-user-id'), 'fictional-user')
+    assert.equal(new Headers(call.init.headers).get('user-agent'), 'CLI/2.63.2 CodeBuddy/2.63.2')
     const body = JSON.parse(call.init.body as string)
     assert.equal(body.PageNumber, index + 1)
     assert.equal(body.PageSize, 100)

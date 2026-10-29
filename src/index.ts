@@ -5,7 +5,6 @@ import { CodeBuddyAdapter } from './adapter.ts'
 import { CODEBUDDY_EFFORTS, resolveConfig } from './config.ts'
 import { resolveEffort } from './effort.ts'
 import { CallRuntime } from './runtime.ts'
-import { runCodeBuddy } from './runner.ts'
 import { SettingsStore } from './settings.ts'
 import { registerSettingsRoutes, type WebServerLike } from './web.ts'
 import { AccountStore, AccountAuthManager } from './accounts.ts'
@@ -41,7 +40,7 @@ export function apply(ctx: Context, entry: Record<string, unknown> = {}): void {
       const command = rawInput.trim() || 'help'
       if (command === 'runs') return { kind: 'success', text: JSON.stringify(runtime.snapshots(), null, 2) }
       if (command === 'status') return { kind: 'success', text: [
-        '**CodeBuddy bridge**', `Enabled: ${config.enabled}`, `CLI: ${config.codebuddyBin || 'codebuddy (PATH)'}`,
+        '**CodeBuddy bridge**', ...(store.loadError ? [store.loadError] : []), `Enabled: ${config.enabled}`, `CLI: ${config.codebuddyBin || 'codebuddy (PATH)'}`,
         `Model: ${config.defaultModel}`, `Default effort: ${config.reasoningEffort} (server reasoning unconfirmed)`,
         `Concurrency: ${config.maxConcurrency}; queue timeout: ${config.queueTimeoutMs}ms; no-progress warning: ${config.stallWarnMs}ms`,
         'Execution mode: autonomous (ACP stdio, fixed)',

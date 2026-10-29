@@ -1,4 +1,5 @@
 import type { Message, ToolSchema } from '@deepseek-ai/dsh-llm';
+/** @deprecated Legacy parser compatibility only; provider replies are opaque ACP output. */
 export { parseResponse } from './response.ts';
 /** Wire instructions belong outside the quoted conversation, at system priority. */
 export declare const RESPONSE_CONTRACT: string;

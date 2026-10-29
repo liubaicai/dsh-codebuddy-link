@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Codebuddy 桥接",
+    "title": "CodeBuddy Bridge",
     "description": "Call models directly through the official CodeBuddy CLI without reverse-engineering model APIs. Shares account credits with WorkBuddy."
   }
 }
