@@ -7,7 +7,7 @@ export type BridgeEvent =
   | { type: 'metadata'; model?: string; totalCredits?: number; totalCostUsd?: number }
   | { type: 'tool-start'; id: string; name: string; input?: unknown }
   | { type: 'tool-end'; id: string; name?: string; output?: unknown; isError?: boolean }
-  | { type: 'result'; sessionId?: string; text: string; structuredOutput?: unknown };
+  | { type: 'result'; sessionId?: string; text: string; structuredOutput?: unknown; partialSuccess?: boolean };
 
 type RecordValue = Record<string, unknown>;
 const record = (value: unknown): RecordValue => value !== null && typeof value === 'object' && !Array.isArray(value) ? value as RecordValue : {};

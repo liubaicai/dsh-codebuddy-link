@@ -64,6 +64,7 @@ export async function* runCodeBuddyAcp(request) {
     let sessionId;
     let failure;
     let finished = false;
+    let partialSuccess = false;
     let promptResponded = false;
     let closed = false;
     let resolveClosed;
@@ -404,13 +405,19 @@ export async function* runCodeBuddyAcp(request) {
                 throw protocolError();
             const resultMeta = object(result._meta) ? result._meta : {};
             const outcome = resultMeta['codebuddy.ai/outcome'];
-            if (outcome !== undefined && outcome !== 'SUCCESS')
+            // CLI outcome is a task-quality summary: even recovered/local tool errors
+            // can produce PARTIAL_SUCCESS alongside a completed final answer. Accept
+            // only this known nonfatal outcome; the stopReason check still applies.
+            if (outcome !== undefined && outcome !== 'SUCCESS' && outcome !== 'PARTIAL_SUCCESS')
                 throw new Error('CodeBuddy ACP reported an unsuccessful outcome');
             if (result.stopReason !== 'end_turn') {
                 const reasons = { cancelled: 'cancelled', refusal: 'refused', max_tokens: 'stopped at the token limit', max_turn_requests: 'stopped at the turn limit' };
                 const reason = owns(reasons, result.stopReason) ? reasons[result.stopReason] : 'stopped without end_turn';
                 throw new Error(`CodeBuddy ACP request ${reason}`);
             }
+            partialSuccess = outcome === 'PARTIAL_SUCCESS';
+            if (partialSuccess && !output.trim())
+                throw new Error('CodeBuddy ACP reported partial success without a final answer');
             finished = true;
             notify();
         }
@@ -453,7 +460,7 @@ export async function* runCodeBuddyAcp(request) {
         }
         if (failure)
             throw failure;
-        finalResult = { type: 'result', sessionId, text: output };
+        finalResult = { type: 'result', sessionId, text: output, ...(partialSuccess ? { partialSuccess: true } : {}) };
     }
     catch (error) {
         primaryError = error;

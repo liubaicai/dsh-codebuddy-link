@@ -28,6 +28,7 @@ export type BridgeEvent = {
     sessionId?: string;
     text: string;
     structuredOutput?: unknown;
+    partialSuccess?: boolean;
 };
 /** Incremental UTF-8 NDJSON framing. Final unterminated lines are valid. */
 export declare class NdjsonDecoder {

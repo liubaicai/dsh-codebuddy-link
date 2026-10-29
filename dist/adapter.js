@@ -75,6 +75,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
         let previewRemaining = 1024;
         let previewTruncated = false;
         let resultText = '';
+        let partialSuccess = false;
         let usage;
         let sessionId;
         const close = () => {
@@ -145,8 +146,13 @@ export class CodeBuddyAdapter extends LlmAdapter {
                 else if (event.type === 'result') {
                     sessionId = event.sessionId;
                     resultText = event.text;
+                    partialSuccess = event.partialSuccess === true;
                 }
             }
+            // Put the fixed warning in the visible final answer, not only the collapsed
+            // reasoning preview. Never expose upstream error text or replay native work.
+            if (autonomous && partialSuccess)
+                yield* append('text', '> CodeBuddy 部分成功：执行过程中出现错误，以下为已生成的答案，请核对相关结论。\n\n');
             if (autonomous)
                 yield* append('text', resultText || rawText);
             else if (!rawText && resultText)

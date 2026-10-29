@@ -86,6 +86,37 @@ test('ordinary calls use native tools and show progress as reasoning before the 
   assertNoReplay(out)
 })
 
+test('partial success keeps the full answer with a visible fixed warning and never replays tools', async () => {
+  const answer = '完整答案😀' + '正文'.repeat(2000)
+  let calls = 0
+  const runner: Runner = async function* () {
+    calls++
+    yield {type:'tool-end',id:'failed',name:'Read',isError:true,output:'SECRET_TOKEN'}
+    yield {type:'text',delta:answer}
+    yield {type:'usage',input:10,output:5,cacheRead:3,cacheWrite:2}
+    yield {type:'result',text:answer,sessionId:'partial',partialSuccess:true}
+  }
+  const out = await collect(new CodeBuddyAdapter(providerConfig(),runner).stream(options))
+  const final = out.filter(c=>c.type==='text-delta').map(c=>c.text).join('')
+  assert.equal(final, '> CodeBuddy 部分成功：执行过程中出现错误，以下为已生成的答案，请核对相关结论。\n\n' + answer)
+  assert.ok(!JSON.stringify(out).includes('SECRET_TOKEN'))
+  assert.ok(out.some(c=>c.type==='usage' && c.usage.inputTokens===10))
+  assert.equal(calls,1)
+  assertNoReplay(out)
+})
+
+test('failure after a partial result never publishes a warning or a completed answer', async () => {
+  const runner: Runner = async function* () {
+    yield {type:'text',delta:'preview'}
+    yield {type:'result',text:'answer',partialSuccess:true}
+    throw new Error('CodeBuddy ACP process cleanup failed')
+  }
+  const out = await collect(new CodeBuddyAdapter(providerConfig(),runner).stream(options))
+  assert.ok(!out.some(c=>c.type==='text-delta'))
+  const finish = out.at(-1)
+  assert.equal(finish?.type==='finish' && finish.reason.kind,'error')
+})
+
 test('long native answers retain a bounded progress preview and an intact final result', async () => {
   const text = 'x'.repeat(1023) + '😀' + '正文'.repeat(2000)
   const runner: Runner = async function* () {

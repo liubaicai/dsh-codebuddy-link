@@ -77,6 +77,14 @@ input.on('line', line => {
  if (mode === 'bad-update') return send({jsonrpc:'2.0',method:'session/update',params:{sessionId:'wrong',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'SECRET_TOKEN'}}}});
  if (mode.startsWith('stop:')) return reply(row.id,{stopReason:mode.slice(5)});
  if (mode==='outcome')return reply(row.id,{stopReason:'end_turn',_meta:{'codebuddy.ai/outcome':'ERROR'}});
+ if (mode.startsWith('outcome:')) {
+  const [,outcome,stopReason='end_turn',answer='present']=mode.split(':');
+  update({sessionUpdate:'tool_call',toolCallId:'failed-tool',status:'failed',rawOutput:'SECRET_TOKEN'});
+  if(answer==='present'){text('完整答案😀');text('保留末尾。');}
+  else if(answer==='blank')text('  \n');
+  reply(row.id,{stopReason,_meta:{'codebuddy.ai/outcome':outcome==='null'?null:outcome,'codebuddy.ai/errorMessage':'SECRET_TOKEN https://private.invalid'}});
+  return;
+ }
  if (mode === 'permission') return send({jsonrpc:'2.0',id:'permission-1',method:'session/request_permission',params:{sessionId:'fresh-session',toolCall:{toolCallId:'p',title:'SECRET_TOKEN HIGH CRITICAL'},options:[{optionId:'yes',name:'Allow',kind:'allow_once'}]}});
  if (mode === 'unknown') return send({jsonrpc:'2.0',id:'host-1',method:'terminal/create',params:{command:'must never execute'}});
  if (['hang','yield-tree','tree','orphan'].includes(mode)) {
@@ -298,6 +306,35 @@ test('server errors, malformed frames, invalid RPC, oversized frames and early e
     const f = await fixture(t);
     await assert.rejects(collect(runCodeBuddyAcp({ ...f, prompt })), error => error instanceof Error && !/SECRET_TOKEN|private\.invalid/.test(error.message), prompt);
     await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));
+  }
+});
+
+test('end_turn PARTIAL_SUCCESS preserves the complete answer and explicit status after cleanup', async t => {
+  const f = await fixture(t);
+  const events = await collect(runCodeBuddyAcp({...f,prompt:'outcome:PARTIAL_SUCCESS'}));
+  assert.deepEqual(events.at(-1), {type:'result',sessionId:'fresh-session',text:'完整答案😀保留末尾。',partialSuccess:true});
+  assert.ok(events.some(event=>event.type==='tool-end' && event.isError));
+  assert.equal((await wire(f.cwd)).filter(row=>row.method==='session/prompt').length,1);
+  await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
+});
+
+test('partial success never overrides a non-end_turn stop or a missing answer', {timeout:60000}, async t => {
+  for (const suffix of ['cancelled','refusal','max_tokens','max_turn_requests','unknown','end_turn:empty','end_turn:blank']) {
+    const f = await fixture(t);
+    const events: BridgeEvent[] = [];
+    await assert.rejects(async()=>{for await(const event of runCodeBuddyAcp({...f,prompt:`outcome:PARTIAL_SUCCESS:${suffix}`}))events.push(event)},
+      error=>error instanceof Error && !error.message.includes('SECRET_TOKEN'));
+    assert.ok(!events.some(event=>event.type==='result'));
+  }
+});
+
+test('failed and unknown outcomes remain failures even with an answer and end_turn', {timeout:60000}, async t => {
+  for (const outcome of ['FAILED_MODEL_REQUEST','FAILED_TOOL_EXECUTION','FAILED_AGENT_LOOP','CANCELLED','PERMISSION_DENIED','REFUSED_OR_BLOCKED','UNKNOWN','null','SECRET_TOKEN']) {
+    const f = await fixture(t);
+    const events: BridgeEvent[] = [];
+    await assert.rejects(async()=>{for await(const event of runCodeBuddyAcp({...f,prompt:`outcome:${outcome}`}))events.push(event)},
+      {message:'CodeBuddy ACP reported an unsuccessful outcome'});
+    assert.ok(!events.some(event=>event.type==='result'));
   }
 });
 

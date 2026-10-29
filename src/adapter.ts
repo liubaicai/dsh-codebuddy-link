@@ -62,6 +62,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
     let previewRemaining = 1024
     let previewTruncated = false
     let resultText = ''
+    let partialSuccess = false
     let usage: TokenUsage | undefined
     let sessionId: string | undefined
     const close = (): StreamChunk[] => {
@@ -117,8 +118,11 @@ export class CodeBuddyAdapter extends LlmAdapter {
           yield* append('reasoning', `\n[CodeBuddy ${event.type === 'tool-start' ? '执行' : event.isError ? '失败' : '完成'}: ${name}]\n`)
         }
         else if (event.type === 'usage') usage = { inputTokens: event.input, outputTokens: event.output, cacheReadTokens: event.cacheRead, cacheWriteTokens: event.cacheWrite }
-        else if (event.type === 'result') { sessionId = event.sessionId; resultText = event.text }
+        else if (event.type === 'result') { sessionId = event.sessionId; resultText = event.text; partialSuccess = event.partialSuccess === true }
       }
+      // Put the fixed warning in the visible final answer, not only the collapsed
+      // reasoning preview. Never expose upstream error text or replay native work.
+      if (autonomous && partialSuccess) yield* append('text', '> CodeBuddy 部分成功：执行过程中出现错误，以下为已生成的答案，请核对相关结论。\n\n')
       if (autonomous) yield* append('text', resultText || rawText)
       else if (!rawText && resultText) yield* append('text', resultText)
       yield* close()

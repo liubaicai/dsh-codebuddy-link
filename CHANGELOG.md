@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.24
+
+- Preserve completed ACP answers for `end_turn + PARTIAL_SUCCESS` with nonblank text instead of treating CLI task-quality warnings as fatal. Show a fixed visible partial-success notice without exposing raw error details or replaying work. Keep failed/unknown outcomes, other stop reasons, empty partial results and cleanup failures fail-closed.
+
 ## 0.3.23
 
 - Change ACP timeout from a total execution deadline to an inactivity watchdog. Valid text, thought and active-tool updates renew the budget, so progressing tasks can exceed ten minutes. Keep idle timeout cancellation/process cleanup, ignore stderr and unrelated metadata as keepalives, and stop the watchdog at prompt completion. Print-mode delegation/background deadlines remain unchanged.
