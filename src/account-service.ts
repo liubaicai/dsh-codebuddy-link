@@ -72,7 +72,9 @@ export class AccountService implements RuntimeAccounts {
   }
   async discover(): Promise<{models: ModelDiscoveryResult['models']; message?: string}> {
     if (!this.store.hasManagedAccounts()) return createModelDiscoverer({bin:this.config.codebuddyBin})()
-    const rows = this.store.list().filter(row => row.enabled && row.authState === 'ready')
+    const selection = this.store.snapshot()
+    const rows = this.store.list().filter(row => row.enabled && row.authState === 'ready'
+      && (selection.mode !== 'fixed' || row.id === selection.selectedAccountId))
     await Promise.all(rows.map(row => this.query(row.id, true)))
     return { models: [...new Map(rows.flatMap(row => this.catalogs.get(row.id)?.models ?? []).map(model => [model.id, model])).values()] }
   }

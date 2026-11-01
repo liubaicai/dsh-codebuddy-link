@@ -1,8 +1,5 @@
-import { open, realpath } from 'node:fs/promises'
-import { basename, delimiter, dirname, isAbsolute, join } from 'node:path'
 import { parseCredential } from './auth.ts'
 import { CODEBUDDY_COMPAT_USER_AGENT } from './compatibility.ts'
-import { resolveCodeBuddyBin } from './runner.ts'
 import { isRequestModelIdentifier, isReturnedModelIdentifier } from './model-id.ts'
 
 const CN_ENDPOINT = 'https://www.codebuddy.cn/v3/config'
@@ -57,11 +54,13 @@ export interface ModelDiscoveryResult {
 }
 export interface ModelDiscovererOptions {
   bin?: string
+  /** Catalog channel. Never merge models across regions. */
+  region?: 'cn' | 'international'
   fetch?: typeof globalThis.fetch
   /** Explicit server-side AuthStore.read injection only. Never scans credential caches. */
   readCredentials?: () => Promise<unknown>
   now?: () => Date
-  /** Set false to exclude installed package candidates; candidates are not entitlement checks. */
+  /** Deprecated: unscoped package catalogs are never used. */
   packageFallback?: boolean
   timeoutMs?: number
 }
@@ -91,68 +90,6 @@ export function parseModelConfiguration(value: unknown): DiscoveredModel[] {
   }
   return result
 }
-async function fileJSON(path: string): Promise<unknown> {
-  const file = await open(path, 'r')
-  try {
-    const stat = await file.stat()
-    if (!stat.isFile() || stat.size > LIMIT) throw new Error('Invalid package configuration')
-    const bytes = Buffer.alloc(LIMIT + 1)
-    const { bytesRead } = await file.read(bytes, 0, bytes.length, 0)
-    if (bytesRead > LIMIT) throw new Error('Package configuration too large')
-    return JSON.parse(bytes.subarray(0, bytesRead).toString('utf8')) as unknown
-  } finally { await file.close() }
-}
-function packageRoot(entry: string): string | undefined {
-  // Official releases use both the older dist entry and the current bin wrapper.
-  const folder = basename(dirname(entry)), name = basename(entry)
-  return (folder === 'dist' && name === 'codebuddy.js') || (folder === 'bin' && name === 'codebuddy') ? dirname(dirname(entry)) : undefined
-}
-async function readPackageModels(candidate: string): Promise<DiscoveredModel[]> {
-  const root = await realpath(candidate)
-  const manifestPath = join(root, 'package.json'), productPath = join(root, 'product.json')
-  // Do not follow a product/manifest symlink into user configuration or secret files.
-  if (await realpath(manifestPath) !== manifestPath || await realpath(productPath) !== productPath) return []
-  const manifest = object(await fileJSON(manifestPath))
-  if (manifest?.name !== '@tencent-ai/codebuddy-code') return []
-  return parseModelConfiguration(await fileJSON(productPath))
-}
-async function packageModels(bin?: string): Promise<DiscoveredModel[]> {
-  // Never execute npm/CLI/shells or inspect ~/.codebuddy, .npmrc, login files,
-  // product overrides or cache directories. An explicit bin pins one installation.
-  try {
-    const executable = await resolveCodeBuddyBin(bin || 'codebuddy')
-    const entry = executable.args[0] ?? executable.command
-    const root = packageRoot(await realpath(entry))
-    if (root) {
-      const models = await readPackageModels(root)
-      if (models.length) return models
-    }
-  } catch { /* A desktop process can inherit a PATH without npm launchers. */ }
-  if (bin && bin !== 'codebuddy') return []
-
-  // Bounded standard installation prefixes, not user-specific paths or a disk scan.
-  // NVM_SYMLINK is essential on Windows: Electron's execPath is not the Node binary.
-  const prefixes = [process.env.NVM_SYMLINK, process.env.npm_config_prefix, process.env.NPM_CONFIG_PREFIX,
-    process.platform === 'win32' && process.env.APPDATA ? join(process.env.APPDATA, 'npm') : undefined,
-    dirname(process.execPath), ...(process.env.PATH ?? '').split(delimiter).slice(0, 128)]
-  const roots = new Set<string>()
-  for (const value of prefixes) {
-    const prefix = value?.replace(/^"|"$/g, '')
-    if (!prefix || !isAbsolute(prefix)) continue
-    roots.add(join(prefix, 'node_modules', '@tencent-ai', 'codebuddy-code'))
-    if (process.platform !== 'win32') {
-      roots.add(join(prefix, 'lib', 'node_modules', '@tencent-ai', 'codebuddy-code'))
-      if (basename(prefix) === 'bin') roots.add(join(dirname(prefix), 'lib', 'node_modules', '@tencent-ai', 'codebuddy-code'))
-    }
-  }
-  for (const root of roots) {
-    try {
-      const models = await readPackageModels(root)
-      if (models.length) return models
-    } catch { /* A missing/malformed candidate must not hide later valid installs. */ }
-  }
-  return []
-}
 async function responseJSON(response: Response, limit = LIMIT): Promise<unknown> {
   if (!response.body) throw new Error('Missing response')
   const reader = response.body.getReader(), chunks: Uint8Array[] = []
@@ -174,23 +111,46 @@ async function responseJSON(response: Response, limit = LIMIT): Promise<unknown>
  * no auth, no credentials sent). Falls back to the bundled static snapshot.
  * Enrichment failures never fail discovery: the window is metadata, not access.
  */
-async function enrichContextWindows(models: DiscoveredModel[], fetcher: typeof globalThis.fetch, timeoutMs: number): Promise<void> {
-  let registry: Map<string, number> | undefined
-  try {
-    const request = (async () => {
-      const response = await fetcher(MODELS_DEV_ENDPOINT, { redirect: 'error', credentials: 'omit', signal: AbortSignal.timeout(timeoutMs) })
-      if (!response.ok) return
-      registry = parseContextRegistry(await responseJSON(response, MODELS_DEV_LIMIT))
-    })()
+const contextEnrichers = new WeakMap<typeof globalThis.fetch, (models: DiscoveredModel[]) => void>()
+function createContextEnricher(fetcher: typeof globalThis.fetch, timeoutMs: number): (models: DiscoveredModel[]) => void {
+  const existing = contextEnrichers.get(fetcher)
+  if (existing) return existing
+  let registry = new Map<string, number>()
+  let pending: Promise<void> | undefined
+  let refreshAfter = 0
+  const refresh = async () => {
+    const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout> | undefined
-    // The fetcher may ignore the abort signal; race so discovery never stalls.
-    await Promise.race([request, new Promise<void>(resolve => { timer = setTimeout(resolve, timeoutMs) })])
-    if (timer) clearTimeout(timer)
-  } catch { /* offline or blocked: static snapshot below still applies */ }
-  for (const model of models) {
-    const context = registry?.get(model.id.toLowerCase()) ?? STATIC_CONTEXT_WINDOWS[model.id]
-    if (Number.isSafeInteger(context) && context! > 0) model.contextWindow = context
+    try {
+      const request = (async () => {
+        const response = await fetcher(MODELS_DEV_ENDPOINT, { redirect: 'error', credentials: 'omit', signal: controller.signal })
+        if (!response.ok) throw new Error('Registry unavailable')
+        return parseContextRegistry(await responseJSON(response, MODELS_DEV_LIMIT))
+      })()
+      const fresh = await Promise.race([request, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => { controller.abort(); reject(new Error('Registry timeout')) }, timeoutMs)
+        timer.unref?.()
+      })])
+      if (!fresh.size) throw new Error('Empty registry')
+      registry = fresh
+      refreshAfter = Date.now() + 24 * 60 * 60 * 1000
+    } catch {
+      // Keep stale metadata on failure and avoid retrying on every settings read.
+      refreshAfter = Date.now() + 60 * 1000
+    } finally { clearTimeout(timer); controller.abort() }
   }
+  const enrich = (models: DiscoveredModel[]) => {
+    for (const model of models) {
+      const context = registry.get(model.id.toLowerCase()) ?? STATIC_CONTEXT_WINDOWS[model.id]
+      if (Number.isSafeInteger(context) && context! > 0) model.contextWindow = context
+    }
+    // Metadata must never delay discovery or mutate an already returned catalog.
+    if (!pending && Date.now() >= refreshAfter) {
+      pending = refresh().finally(() => { pending = undefined })
+    }
+  }
+  contextEnrichers.set(fetcher, enrich)
+  return enrich
 }
 
 /**
@@ -206,6 +166,7 @@ export function createModelDiscoverer(options: ModelDiscovererOptions = {}): () 
   const fetcher = options.fetch ?? globalThis.fetch
   const timeoutMs = options.timeoutMs ?? 15_000
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60_000) throw new RangeError('Invalid model discovery timeout')
+  const enrichContextWindows = createContextEnricher(fetcher, timeoutMs)
   const result = (status: ModelDiscoveryResult['status'], message: string): ModelDiscoveryResult => ({ status, models: [], source: 'official-config', message })
   const remote = async (endpoint: string): Promise<ModelDiscoveryResult> => {
     let outcome = result('unavailable', '官方配置未返回可识别的 CLI 模型列表。')
@@ -251,34 +212,14 @@ export function createModelDiscoverer(options: ModelDiscovererOptions = {}): () 
     return outcome
   }
   return async () => {
-    // Independent deadlines retain a successful region even if another hangs.
-    // Query the package even when CN succeeds: it can contain international ids.
-    const [cn, international, packaged] = await Promise.all([
-      remote(CN_ENDPOINT), remote(INTERNATIONAL_ENDPOINT),
-      options.packageFallback === false ? Promise.resolve([] as DiscoveredModel[]) : packageModels(options.bin).catch(() => [] as DiscoveredModel[]),
-    ])
-    const models = new Map<string, DiscoveredModel>()
-    // Prefer live names, then package names, with deterministic regional ordering.
-    for (const model of [...cn.models, ...international.models, ...packaged]) {
-      if (!models.has(model.id)) models.set(model.id, model)
+    const international = options.region === 'international'
+    const catalog = await remote(international ? INTERNATIONAL_ENDPOINT : CN_ENDPOINT)
+    // Installed product.json is not channel/account scoped and can contain GPT
+    // candidates for a CN account. Never use it to populate the settings catalog.
+    if (catalog.models.length) {
+      enrichContextWindows(catalog.models)
+      catalog.message = `已获取${international ? '国际区' : '中国区'}官方 CLI 目录。实际调用仍受账户权限与余额限制。`
     }
-    const notes = [
-      cn.status === 'ok' ? '已获取中国区官方 CLI 目录。' : `中国区：${cn.message}`,
-      international.status === 'ok' ? '已获取国际区公开 CLI 目录。' : '国际区公开目录未能获取，可能需要国际区独立授权；当前候选不代表完整国际目录，未向国际域名发送中国区凭据。',
-      packaged.length ? '已合并安装包 CLI 模型候选。' : '',
-      '模型候选未验证账户可用权限；实际调用仍受地区、账户权限与余额限制。',
-    ].filter(Boolean).join(' ')
-    if (models.size) {
-      const discovered = [...models.values()]
-      await enrichContextWindows(discovered, fetcher, timeoutMs)
-      return {
-        status: 'ok', models: discovered,
-        source: cn.models.length || international.models.length ? 'official-config' : 'cli-package',
-        updatedAt: (options.now ?? (() => new Date()))().toISOString(), message: notes,
-      }
-    }
-    const status = [cn.status, international.status].includes('error') ? 'error'
-      : [cn.status, international.status].includes('auth-required') ? 'auth-required' : 'unavailable'
-    return result(status, notes)
+    return catalog
   }
 }

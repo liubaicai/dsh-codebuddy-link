@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.27
+
+- Return model catalogs without waiting for models.dev. Use cached context metadata or the bundled snapshot immediately, refresh anonymously in the background, and coalesce requests with bounded retries.
+- Keep model catalogs channel-specific: default to the China official directory, never merge international or unscoped installed-package candidates, and query only the selected account in fixed-account mode.
+
 ## 0.3.26
 
 - Isolate CLI authentication from the launching shell: strip inherited `CODEBUDDY_AUTH_TOKEN` casing variants and inject only the explicitly selected account token.

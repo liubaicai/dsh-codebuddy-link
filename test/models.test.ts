@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, mkdir, writeFile, rm, chmod } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { createModelDiscoverer, parseContextRegistry, parseModelConfiguration, STATIC_CONTEXT_WINDOWS } from '../src/models.ts'
 
 const configuration = {
@@ -51,19 +48,32 @@ test('parseContextRegistry projects provider-qualified ids and keeps only safe i
   assert.equal(parseContextRegistry('nope').size, 0)
 })
 
-test('discovery enriches context windows from models.dev with static fallback and bounded hangs', async () => {
+test('discovery uses static metadata immediately then reuses the background registry cache', async () => {
   const catalog = { models: [{ id: 'hy3', name: 'Hunyuan' }, { id: 'mystery', name: 'Mystery' }], agents: [{ name: 'cli', models: ['hy3', 'mystery'] }] }
   const devRegistry = { tencent: { models: { 'tencent/hy3': { limit: { context: 300000 } } } } }
   const cn = async (url: unknown, dev: () => Promise<Response>): Promise<Response> =>
     String(url) === 'https://models.dev/api.json' ? dev()
     : String(url).endsWith('codebuddy.ai/v3/config') ? new Response(JSON.stringify({ code: 0, data: { models: null } }))
     : new Response(JSON.stringify({ code: 0, data: catalog }))
-  const enriched = await createModelDiscoverer({ fetch: (url, init) => cn(url, async () => {
+  let release!: (response: Response) => void
+  let registryCalls = 0
+  const discover = createModelDiscoverer({ packageFallback: false, fetch: (url, init) => cn(url, () => {
+    registryCalls++
     assert.equal(init!.credentials, 'omit')
-    return new Response(JSON.stringify(devRegistry))
-  }) })()
+    assert.equal(init!.headers, undefined)
+    return new Promise<Response>(resolve => { release = resolve })
+  }) })
+  const enriched = await discover()
   assert.equal(enriched.status, 'ok')
-  assert.equal(enriched.models.find(m => m.id === 'hy3')?.contextWindow, 300000)
+  assert.equal(enriched.models.find(m => m.id === 'hy3')?.contextWindow, STATIC_CONTEXT_WINDOWS['hy3'])
+  await discover()
+  assert.equal(registryCalls, 1, 'concurrent refreshes share one registry request')
+  release(new Response(JSON.stringify(devRegistry)))
+  await new Promise(resolve => setImmediate(resolve))
+  const cached = await discover()
+  assert.equal(cached.models.find(m => m.id === 'hy3')?.contextWindow, 300000)
+  assert.equal(registryCalls, 1, 'fresh cache avoids another registry request')
+  assert.equal(enriched.models.find(m => m.id === 'hy3')?.contextWindow, STATIC_CONTEXT_WINDOWS['hy3'], 'background updates do not mutate returned results')
   assert.equal(enriched.models.find(m => m.id === 'mystery')?.contextWindow, undefined)
   const offline = await createModelDiscoverer({ fetch: (url) => cn(url, async () => { throw new Error('offline') }) })()
   assert.equal(offline.models.find(m => m.id === 'hy3')?.contextWindow, STATIC_CONTEXT_WINDOWS['hy3'])
@@ -170,136 +180,23 @@ test('timeout bounds fetchers ignoring cancellation', async () => {
   assert.deepEqual(result.models, [])
   assert.throws(() => createModelDiscoverer({ timeoutMs: Infinity }), RangeError)
 })
-test('international directory merges without receiving China credentials', async () => {
-  const internationalConfiguration = { models: [{ id: 'intl-model', name: 'International model' }], agents: [{ name: 'cli', models: ['intl-model'] }] }
-  const calls: { url: string; init: RequestInit }[] = []
-  const fetch: typeof globalThis.fetch = async (url, init) => {
-    calls.push({ url: String(url), init: init! })
-    if (String(url).endsWith('codebuddy.ai/v3/config')) return new Response(JSON.stringify({ code: 0, data: internationalConfiguration }))
-    return new Response(JSON.stringify({ code: 0, data: { models: null } }))
+test('catalogs stay within the selected channel without package fallback', async () => {
+  const calls: string[] = []
+  const fetch: typeof globalThis.fetch = async url => {
+    calls.push(String(url))
+    if (String(url) === 'https://models.dev/api.json') return new Response('{}', { status: 404 })
+    return new Response(JSON.stringify(String(url).includes('codebuddy.ai')
+      ? { code: 0, data: { models: [{ id: 'gpt-fixture' }], agents: [{ name: 'cli', models: ['gpt-fixture'] }] } }
+      : payload))
   }
-  const result = await createModelDiscoverer({ fetch, packageFallback: false, readCredentials: async () => ({ accessToken: 'cn-secret', uid: 'fixture-user' }) })()
-  assert.equal(result.status, 'ok')
-  assert.ok(result.models.some(model => model.id === 'intl-model'))
-  const internationalCalls = calls.filter(call => call.url.endsWith('codebuddy.ai/v3/config'))
-  assert.equal(internationalCalls.length, 1)
-  for (const call of internationalCalls) assert.equal(new Headers(call.init.headers).get('authorization'), null)
-  const cnCalls = calls.filter(call => call.url.endsWith('codebuddy.cn/v3/config'))
-  assert.equal(new Headers(cnCalls[1]!.init.headers).get('authorization'), 'Bearer cn-secret')
-  assert.ok(!JSON.stringify(result).includes('cn-secret'))
-})
-test('CN success still merges international catalog and package candidates with deduplication', async () => {
-  const international = { code: 0, data: { models: [{ id: 'fixture-model', name: 'Stale international name' }, { id: 'intl-model', name: 'Intl-only' }], agents: [{ name: 'cli', models: ['fixture-model', 'intl-model'] }] } }
-  const dir = await mkdtemp(join(tmpdir(), 'cb-merge-'))
-  try {
-    await mkdir(join(dir, 'bin'))
-    await writeFile(join(dir, 'bin', 'codebuddy'), '#!/usr/bin/env node\n')
-    await chmod(join(dir, 'bin', 'codebuddy'), 0o755)
-    await writeFile(join(dir, 'package.json'), JSON.stringify({ name: '@tencent-ai/codebuddy-code' }))
-    await writeFile(join(dir, 'product.json'), JSON.stringify({ models: [{ id: 'pkg-model', name: 'Pkg-only' }, { id: 'fixture-model', name: 'Stale package name' }], agents: [{ name: 'cli', models: ['pkg-model', 'fixture-model'] }] }))
-    const merged = await createModelDiscoverer({ bin: join(dir, 'bin', 'codebuddy'), fetch: mock([payload], 200, international).fetch })()
-    assert.equal(merged.status, 'ok')
-    assert.equal(merged.source, 'official-config')
-    assert.deepEqual(merged.models, [
-      { id: 'fixture-model', name: 'Fixture model' },
-      { id: 'intl-model', name: 'Intl-only' },
-      { id: 'pkg-model', name: 'Pkg-only' },
-    ])
-    assert.match(merged.message, /已获取中国区官方 CLI 目录。/)
-    assert.match(merged.message, /已获取国际区公开 CLI 目录。/)
-    assert.match(merged.message, /已合并安装包 CLI 模型候选。/)
-    // Partial failure: international endpoint down must not hide the CN catalog.
-    const cnOnly = await createModelDiscoverer({ bin: join(dir, 'bin', 'codebuddy'), fetch: async url => {
-      if (String(url).endsWith('codebuddy.ai/v3/config')) throw new Error('international unreachable')
-      return new Response(JSON.stringify(payload))
-    } })()
-    assert.equal(cnOnly.status, 'ok')
-    assert.deepEqual(cnOnly.models, [{ id: 'fixture-model', name: 'Fixture model' }, { id: 'pkg-model', name: 'Pkg-only' }])
-    assert.match(cnOnly.message, /国际区公开目录未能获取/)
-  } finally { await rm(dir, { recursive: true, force: true }) }
-})
-test('package fallback discovers installed official data without executing CLI or reading user cache', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'cb-models-'))
-  try {
-    await mkdir(join(dir, 'dist'))
-    const bin = join(dir, 'dist', 'codebuddy.js')
-    await writeFile(bin, 'throw new Error("must never execute CLI")')
-    await writeFile(join(dir, 'package.json'), JSON.stringify({ name: '@tencent-ai/codebuddy-code' }))
-    await writeFile(join(dir, 'product.json'), JSON.stringify(configuration))
-    const discover = createModelDiscoverer({ bin, fetch: mock([{ code: 0, data: { models: null } }]).fetch })
-    const result = await discover()
-    assert.equal(result.status, 'ok')
-    assert.equal(result.source, 'cli-package')
-    assert.match(result.message, /未验证账户/)
-    assert.deepEqual(result.models, [{ id: 'fixture-model', name: 'Fixture model' }])
-    await writeFile(join(dir, 'product.json'), JSON.stringify({ ...configuration, models: [{ id: 'fixture-model', name: 'Updated' }] }))
-    assert.equal((await discover()).models[0]?.name, 'Updated')
-    await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'unrelated-package' }))
-    assert.equal((await discover()).status, 'unavailable')
-  } finally { await rm(dir, { recursive: true, force: true }) }
-})
-
-test('current official bin/codebuddy wrapper is recognized without execution', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'cb-wrapper-'))
-  try {
-    await mkdir(join(dir, 'bin'))
-    const bin = join(dir, 'bin', 'codebuddy')
-    await writeFile(bin, '#!/usr/bin/env node\nthrow Error("must never execute")')
-    await chmod(bin, 0o755)
-    await writeFile(join(dir, 'package.json'), JSON.stringify({ name: '@tencent-ai/codebuddy-code', bin: { codebuddy: './bin/codebuddy' } }))
-    await writeFile(join(dir, 'product.json'), JSON.stringify(configuration))
-    const result = await createModelDiscoverer({ bin, fetch: mock([{ code: 0, data: { models: null } }]).fetch })()
-    assert.equal(result.source, 'cli-package')
-    assert.deepEqual(result.models, [{ id: 'fixture-model', name: 'Fixture model' }])
-    if (process.platform === 'win32') {
-      const prefix = join(dir, 'npm'), root = join(prefix, 'node_modules', '@tencent-ai', 'codebuddy-code')
-      await mkdir(join(root, 'bin'), { recursive: true })
-      await writeFile(join(root, 'bin', 'codebuddy'), '#!/usr/bin/env node\nthrow Error("must never execute")')
-      await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@tencent-ai/codebuddy-code' }))
-      await writeFile(join(root, 'product.json'), JSON.stringify(configuration))
-      const shim = join(prefix, 'codebuddy.cmd')
-      await writeFile(shim, '@ECHO off\r\n"node" "%dp0%\\node_modules\\@tencent-ai\\codebuddy-code\\bin\\codebuddy" %*')
-      assert.equal((await createModelDiscoverer({ bin: shim, fetch: mock([{ code: 0, data: { models: null } }]).fetch })()).source, 'cli-package')
-    }
-  } finally { await rm(dir, { recursive: true, force: true }) }
-})
-
-test('desktop PATH without codebuddy discovers NVM and npm prefixes, respecting explicit bin', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'cb-desktop-'))
-  const keys = ['PATH', 'NVM_SYMLINK', 'npm_config_prefix', 'NPM_CONFIG_PREFIX', 'APPDATA'] as const
-  const saved = Object.fromEntries(keys.map(key => [key, process.env[key]]))
-  try {
-    const prefix = join(dir, 'node-install'), root = join(prefix, 'node_modules', '@tencent-ai', 'codebuddy-code')
-    await mkdir(root, { recursive: true })
-    await writeFile(join(root, 'package.json'), JSON.stringify({ name: '@tencent-ai/codebuddy-code' }))
-    await writeFile(join(root, 'product.json'), JSON.stringify(configuration))
-    // No launcher exists at all, and Electron can live far away from this prefix.
-    process.env.PATH = join(dir, 'desktop-path')
-    process.env.APPDATA = join(dir, 'roaming')
-    delete process.env.npm_config_prefix
-    delete process.env.NPM_CONFIG_PREFIX
-    process.env.NVM_SYMLINK = prefix
-    const fetch = mock([{ code: 0, data: { models: null } }]).fetch
-    const discover = createModelDiscoverer({ fetch })
-    assert.equal((await discover()).source, 'cli-package')
-    assert.deepEqual((await discover()).models, [{ id: 'fixture-model', name: 'Fixture model' }])
-    assert.deepEqual((await createModelDiscoverer({ fetch, bin: join(dir, 'missing.js') })()).models, [])
-    assert.deepEqual((await createModelDiscoverer({ fetch, packageFallback: false })()).models, [])
-    process.env.NVM_SYMLINK = join(dir, 'missing-nvm')
-    process.env.npm_config_prefix = prefix
-    assert.equal((await discover()).source, 'cli-package')
-    // An earlier non-official package must not shadow the valid npm installation.
-    const fake = join(dir, 'fake', 'node_modules', '@tencent-ai', 'codebuddy-code')
-    await mkdir(fake, { recursive: true })
-    await writeFile(join(fake, 'package.json'), JSON.stringify({ name: 'not-codebuddy' }))
-    await writeFile(join(fake, 'product.json'), JSON.stringify({ models: [{ id: 'fake' }], agents: [{ name: 'cli', models: ['fake'] }] }))
-    process.env.NVM_SYMLINK = join(dir, 'fake')
-    assert.deepEqual((await discover()).models, [{ id: 'fixture-model', name: 'Fixture model' }])
-    const serialized = JSON.stringify(await discover())
-    assert.ok(!serialized.includes(dir))
-    assert.ok(!serialized.includes('do-not-return'))
-  } finally {
-    for (const key of keys) { if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key] }
-    await rm(dir, { recursive: true, force: true })
-  }
+  const cn = await createModelDiscoverer({ fetch })()
+  assert.deepEqual(cn.models, [{ id: 'fixture-model', name: 'Fixture model' }])
+  assert.ok(!calls.some(url => url.includes('codebuddy.ai')))
+  calls.length = 0
+  const international = await createModelDiscoverer({ fetch, region: 'international', readCredentials: async () => { throw Error('must not read CN credentials') } })()
+  assert.deepEqual(international.models, [{ id: 'gpt-fixture', name: 'gpt-fixture' }])
+  assert.ok(!calls.some(url => url.includes('codebuddy.cn')))
+  const empty = await createModelDiscoverer({ fetch: mock([{ code: 0, data: { models: null } }]).fetch })()
+  assert.deepEqual(empty.models, [])
+  assert.equal(empty.status, 'unavailable')
 })

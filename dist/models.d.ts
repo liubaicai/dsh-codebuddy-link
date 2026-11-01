@@ -20,11 +20,13 @@ export interface ModelDiscoveryResult {
 }
 export interface ModelDiscovererOptions {
     bin?: string;
+    /** Catalog channel. Never merge models across regions. */
+    region?: 'cn' | 'international';
     fetch?: typeof globalThis.fetch;
     /** Explicit server-side AuthStore.read injection only. Never scans credential caches. */
     readCredentials?: () => Promise<unknown>;
     now?: () => Date;
-    /** Set false to exclude installed package candidates; candidates are not entitlement checks. */
+    /** Deprecated: unscoped package catalogs are never used. */
     packageFallback?: boolean;
     timeoutMs?: number;
 }
