@@ -41,7 +41,7 @@ export function registerSettingsRoutes(server: WebServerLike, store: SettingsSto
     ...(accounts ? {accountPool: accounts.snapshot()} : {}),
     auth: auth ? await auth.status() : {configured:false},
     config: {enabled:store.config.enabled, permissionMode:store.config.permissionMode, models:store.config.models,
-      hiddenModels:store.config.hiddenModels, defaultModel:store.config.defaultModel, tools:store.config.tools,
+      hiddenModels:store.config.hiddenModels, defaultModel:store.config.defaultModel, fallbackModels:store.config.fallbackModels, tools:store.config.tools,
       reasoningEffort:store.config.reasoningEffort, maxConcurrency:store.config.maxConcurrency,
       queueTimeoutMs:store.config.queueTimeoutMs, stallWarnMs:store.config.stallWarnMs,
       dangerouslySkipPermissions:store.config.dangerouslySkipPermissions},

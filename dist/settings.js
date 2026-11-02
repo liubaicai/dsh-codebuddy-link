@@ -3,9 +3,9 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { resolveConfig } from "./config.js";
-const panelEditable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'reasoningEffort', 'dangerouslySkipPermissions']);
+const panelEditable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'fallbackModels', 'reasoningEffort', 'dangerouslySkipPermissions']);
 // Persistence/internal updates also retain legacy administrator settings and discovered metadata.
-const editable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'tools', 'modelContext',
+const editable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'fallbackModels', 'tools', 'modelContext',
     'reasoningEffort', 'maxConcurrency', 'queueTimeoutMs', 'stallWarnMs', 'dangerouslySkipPermissions']);
 /** Keys written by older plugin versions. They are dropped on load so saved
  *  settings keep working after the setting was removed; never editable again. */
@@ -61,6 +61,15 @@ export class SettingsStore {
             throw new Error('Default model must be enabled');
         if (!next.models.some(id => !next.hiddenModels.includes(id)))
             throw new Error('Enable at least one model');
+        const availableFallbacks = next.fallbackModels.filter(id => id !== 'default' && next.models.includes(id) && !next.hiddenModels.includes(id));
+        if (Object.hasOwn(updates, 'fallbackModels') && availableFallbacks.length !== next.fallbackModels.length) {
+            throw new Error('Fallback models must be enabled concrete models, not default');
+        }
+        // Older candidates may become hidden or disappear; never block unrelated settings.
+        // Persist normalized order when supplied or pruned, including entry-level candidates.
+        if (Object.hasOwn(updates, 'fallbackModels') || availableFallbacks.length !== next.fallbackModels.length)
+            saved.fallbackModels = availableFallbacks;
+        next.fallbackModels = availableFallbacks;
         mkdirSync(dirname(this.path), { recursive: true });
         const tmp = this.path + '.' + randomUUID() + '.tmp';
         writeFileSync(tmp, JSON.stringify(saved, null, 2) + '\n', { mode: 0o600, flag: 'wx' });

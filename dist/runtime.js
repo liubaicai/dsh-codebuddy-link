@@ -106,7 +106,7 @@ export class CallRuntime {
                     request.onSpawn?.();
                 } })) {
                 if ((event.type === 'text' || event.type === 'reasoning') && event.delta.length > 0
-                    || event.type === 'tool-start' || event.type === 'tool-end') {
+                    || event.type === 'tool-start' || event.type === 'tool-end' || event.type === 'model-switch') {
                     record.state = 'responding';
                     record.lastProgressAt = Date.now();
                 }

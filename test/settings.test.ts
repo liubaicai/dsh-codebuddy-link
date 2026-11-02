@@ -25,6 +25,25 @@ test('runtime settings validate defaults, environment, efforts and numeric bound
   }
 })
 
+test('fallback candidates persist normalized click order and pruning never blocks model settings', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cb-fallback-settings-'))
+  try {
+    const store = new SettingsStore({}, join(dir, 'settings.json'))
+    store.updateFromPanel({models:['first', 'second'], fallbackModels:['second', 'first', 'second']})
+    assert.deepEqual(store.config.fallbackModels, ['second', 'first'])
+    assert.deepEqual(JSON.parse(readFileSync(store.path, 'utf8')).fallbackModels, ['second', 'first'])
+    assert.deepEqual(new SettingsStore({}, store.path).config.fallbackModels, ['second', 'first'])
+    const saved = readFileSync(store.path, 'utf8')
+    for (const fallbackModels of [['unknown'], ['default'], ['bad/path'], null]) assert.throws(() => store.updateFromPanel({fallbackModels}), /fallback|Fallback/)
+    assert.equal(readFileSync(store.path, 'utf8'), saved)
+    store.updateFromPanel({hiddenModels:['second']})
+    assert.deepEqual(store.config.fallbackModels, ['first'])
+    assert.throws(() => store.updateFromPanel({fallbackModels:['second']}), /enabled/)
+    store.updateFromPanel({models:[]})
+    assert.deepEqual(new SettingsStore({}, store.path).config.fallbackModels, [])
+  } finally { rmSync(dir, {recursive:true, force:true}) }
+})
+
 test('panel updates preserve legacy administrator settings while internal metadata updates remain available', () => {
   const dir = mkdtempSync(join(tmpdir(), 'cb-panel-boundary-'))
   const path = join(dir, 'settings.json')
@@ -274,6 +293,7 @@ test('HTTP settings enforce method, same origin, JSON and publish refresh status
   try {
     const initial = await (await fetch(base+'/status')).json() as {config:Record<string,unknown>; runs:Record<string,unknown>[]}
     assert.equal(initial.config.executionMode,undefined); assert.equal(initial.config.dangerouslySkipPermissions,false)
+    assert.deepEqual(initial.config.fallbackModels, [])
     assert.equal(initial.config.reasoningEffort,'auto'); assert.equal(initial.config.maxConcurrency,2)
     assert.equal(initial.config.queueTimeoutMs,600000); assert.equal(initial.config.stallWarnMs,90000)
     assert.equal(initial.runs.length,5); assert.equal(initial.runs[0]!.totalCredits,0); assert.equal(initial.runs[0]!.totalCostUsd,0)
@@ -282,10 +302,11 @@ test('HTTP settings enforce method, same origin, JSON and publish refresh status
     assert.equal((await fetch(base+'/config')).status,405)
     assert.equal((await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json',origin:'https://evil.example'},body:'{}'})).status,403)
     assert.equal((await fetch(base+'/config',{method:'POST',body:'{}'})).status,415)
-    const saved = await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({models:['hy3'],permissionMode:'plan',reasoningEffort:'high',executionMode:'bridge',dangerouslySkipPermissions:true})})
+    const saved = await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({models:['hy3'],fallbackModels:['hy3'],permissionMode:'plan',reasoningEffort:'high',executionMode:'bridge',dangerouslySkipPermissions:true})})
     assert.equal(saved.status,200); assert.equal(changed,1)
     const settings = await saved.json() as {config:Record<string,unknown>}
     assert.equal(settings.config.executionMode,undefined); assert.equal(settings.config.dangerouslySkipPermissions,true)
+    assert.deepEqual(settings.config.fallbackModels, ['hy3'])
     assert.equal(settings.config.reasoningEffort,'high'); assert.equal(settings.config.maxConcurrency,2)
     assert.equal(settings.config.queueTimeoutMs,600000); assert.equal(settings.config.stallWarnMs,90000)
     for (const patch of [{tools:'default'}, {maxConcurrency:3}, {queueTimeoutMs:6000}, {stallWarnMs:0}, {modelContext:{hy3:1}}]) {

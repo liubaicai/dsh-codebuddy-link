@@ -38,8 +38,12 @@ export function acpLimitError(value: unknown): CodeBuddyLimitError | undefined {
   const usage = /quota_token_limit|使用量已超出|(?:token|usage)[ _-]*(?:quota|limit)[ _-]*(?:exceeded|exhausted|reached)|(?:exceeded|exhausted)[ _-]*(?:token|usage)[ _-]*(?:quota|limit)/i.test(detail);
   const quota = data.category === 'quota' || /\b(?:quota(?:_token_limit|_exceeded)?|insufficient_quota)\b|配额|额度/i.test(detail);
   const explicitStatus = typeof data.statusCode === 'number' ? data.statusCode : row.code;
+  // A bare number can be a request ID or remaining balance. Status now gates
+  // native continuation, so text must explicitly identify an HTTP response.
+  const statusText = /\b(?:HTTP(?:\/\d(?:\.\d)?)?(?:\s+(?:status(?:\s+code)?|error))?|status(?:Code|\s+code)?)\s*[:=]?\s*(429|402)\b/i.exec(detail);
+  const textStatus = statusText ? Number(statusText[1]) : /\b429\s+Too\s+Many\s+Requests\b/i.test(detail) ? 429 : /\b402\s+Payment\s+Required\b/i.test(detail) ? 402 : undefined;
   const status = typeof explicitStatus === 'number' && Number.isInteger(explicitStatus) && explicitStatus >= 400 && explicitStatus <= 599
-    ? explicitStatus : /\b429\b/.test(detail) ? 429 : /\b402\b/.test(detail) ? 402 : undefined;
+    ? explicitStatus : textStatus;
   if (!credits && !usage && !quota && status !== 429 && data.category !== 'rate_limit') return;
 
   // Extract only an explicitly labelled reset time, including its timezone.

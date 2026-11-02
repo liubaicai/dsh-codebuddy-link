@@ -106,6 +106,26 @@ test('partial success keeps the full answer with a visible fixed warning and nev
   assertNoReplay(out)
 })
 
+test('ordered candidates reach ACP only and switched drafts never leak into the final answer', async () => {
+  const cfg = providerConfig({models:['primary','backup','hidden'],hiddenModels:['hidden'],fallbackModels:['hidden','missing','primary','backup']})
+  const requests: Array<Parameters<Runner>[0]> = []
+  const runner: Runner = async function* (request) {
+    requests.push(request)
+    yield {type:'text',delta:'失败模型的草稿'}
+    yield {type:'model-switch',model:'backup'}
+    yield {type:'text',delta:'续接后的正文'}
+    yield {type:'result',text:''}
+  }
+  const out = await collect(new CodeBuddyAdapter(cfg,runner).stream({...options,model:'primary'}))
+  assert.deepEqual(requests[0]!.fallbackModels,['backup'])
+  assert.equal(out.filter(c=>c.type==='text-delta').map(c=>c.text).join(''),'续接后的正文')
+  assert.match(out.filter(c=>c.type==='reasoning-delta').map(c=>c.text).join(''),/HTTP 429.*backup.*继续当前任务/)
+  assertNoReplay(out)
+  const housekeeping: Runner = async function* (request) { requests.push(request); yield {type:'result',text:'title'} }
+  await collect(new CodeBuddyAdapter(cfg,housekeeping).stream({...options,model:'primary',purpose:'session-title'}))
+  assert.equal(requests[1]!.fallbackModels,undefined)
+})
+
 test('quota failures and partial warnings show the safe reason and model-switch advice', async () => {
   const error = acpLimitError(JSON.stringify({code:-32003,message:'Quota exceeded SECRET_TOKEN',data:{category:'quota',statusCode:429}}))!
   for (const partial of [false,true]) {

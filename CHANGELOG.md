@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.30
+
+- Add ordered, opt-in candidate models beside the default-model setting, with numbered multi-selection and hover help. Empty selection preserves fail-fast behavior.
+- Continue unfinished ACP tasks after explicit HTTP 429 by switching models inside the same native session, once per candidate. Preserve committed tool history, account affinity and cumulative usage without resending the original task or replaying tools through DSH. Exhaustion, unconfirmed switching, cancellation and non-429 failures stop execution.
+- Keep switching under the inactivity watchdog, distinguish explicit HTTP status from unrelated numbers in errors, and never resume a native cancellation or a completed answer because of historical quota metadata. Print-mode delegation and housekeeping remain unchanged.
+
 ## 0.3.29
 
 - Keep actionable quota diagnostics visible in DSH by using provider-specific non-retryable codes instead of the host's generic QUOTA notice. Preserve HTTP status and verified recovery time in the displayed message.

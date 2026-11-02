@@ -2,6 +2,15 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolveConfig } from '../src/config.ts'
 
+test('fallback models default empty and validate strict ordered model IDs', () => {
+  assert.deepEqual(resolveConfig({}, {}).fallbackModels, [])
+  assert.deepEqual(resolveConfig({fallbackModels:['second', 'first', 'second']}, {}).fallbackModels, ['second', 'first'])
+  assert.deepEqual(resolveConfig({fallbackModels:['m'.repeat(256)]}, {}).fallbackModels, ['m'.repeat(256)])
+  for (const value of [null, false, 'first,second', {}, new Array(1), [1], [''], [' model'], ['model '], ['model\n'], ['provider/model'], ['C:model'], ['m'.repeat(257)]]) {
+    assert.throws(() => resolveConfig({fallbackModels:value}, {}), /Invalid fallbackModels/)
+  }
+})
+
 const modelKeys = ['defaultModel', 'models', 'hiddenModels', 'modelContext'] as const
 const variables = { defaultModel: 'DSH_CODEBUDDY_DEFAULT_MODEL', models: 'DSH_CODEBUDDY_MODELS', hiddenModels: 'DSH_CODEBUDDY_HIDDEN_MODELS', modelContext: 'DSH_CODEBUDDY_MODEL_CONTEXT' }
 function setting(key: typeof modelKeys[number], id: string): unknown {

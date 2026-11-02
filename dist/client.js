@@ -111,6 +111,12 @@ function parseStatus(value) {
     const dangerouslySkipPermissions = c.dangerouslySkipPermissions === undefined ? false : c.dangerouslySkipPermissions;
     if (typeof dangerouslySkipPermissions !== 'boolean')
         throw new Error('服务端状态格式无效');
+    const rawFallbacks = c.fallbackModels === undefined ? [] : c.fallbackModels;
+    if (!strings(rawFallbacks) || !rawFallbacks.every(isRequestModelIdentifier))
+        throw new Error('服务端状态格式无效');
+    const hiddenModels = new Set(c.hiddenModels);
+    const enabledModels = new Set(c.models.filter(id => !hiddenModels.has(id)));
+    const fallbackModels = [...new Set(rawFallbacks)].filter(id => id !== 'default' && enabledModels.has(id));
     const reasoningEffort = c.reasoningEffort ?? 'auto';
     const maxConcurrency = c.maxConcurrency ?? 2;
     const queueTimeoutMs = c.queueTimeoutMs ?? 600000;
@@ -121,7 +127,7 @@ function parseStatus(value) {
     return { settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0,
         modelMessage: parseModelMessage(value.modelMessage),
         config: { enabled: c.enabled, permissionMode: c.permissionMode, models: c.models, hiddenModels: c.hiddenModels,
-            defaultModel: c.defaultModel, tools: c.tools, dangerouslySkipPermissions, reasoningEffort, maxConcurrency, queueTimeoutMs, stallWarnMs },
+            defaultModel: c.defaultModel, fallbackModels, tools: c.tools, dangerouslySkipPermissions, reasoningEffort, maxConcurrency, queueTimeoutMs, stallWarnMs },
         account: parseAccount(value.account), accountPool: parsePool(value.accountPool),
         catalogModels: value.catalogModels.map(model => ({ id: model.id, name: model.name })),
         auth: { configured: isRecord(value.auth) && value.auth.configured === true }, runs: parseRuns(value.runs) };
@@ -405,7 +411,7 @@ function SettingsPanel() {
                 const endpoint = action === 'initial' ? 'status' : action;
                 const result = await request(endpoint, endpoint === 'status' ? undefined : endpoint === 'models' ? {} : {
                     permissionMode: config.permissionMode, dangerouslySkipPermissions: config.dangerouslySkipPermissions,
-                    models: config.models, hiddenModels: config.hiddenModels, defaultModel: config.defaultModel, reasoningEffort: config.reasoningEffort,
+                    models: config.models, hiddenModels: config.hiddenModels, defaultModel: config.defaultModel, fallbackModels: config.fallbackModels, reasoningEffort: config.reasoningEffort,
                 });
                 if (!current())
                     return;
@@ -519,8 +525,18 @@ function SettingsPanel() {
             style: { borderRadius: '16px', overflowWrap: 'anywhere', ...(enabled ? selectedStyle : {}) },
             onClick: () => update({ models: !enabled ? [...new Set([...draft.models, id])] : draft.models,
                 hiddenModels: !enabled ? draft.hiddenModels.filter(hidden => hidden !== id) : [...new Set([...draft.hiddenModels, id])],
+                fallbackModels: enabled ? draft.fallbackModels.filter(model => model !== id) : draft.fallbackModels,
                 defaultModel: enabled && draft.defaultModel === id ? enabledModels.find(model => model !== id) ?? '' : draft.defaultModel }) }, label);
-    })), h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '12px' } }, h('label', { style: field }, '默认模型', h('select', { value: draft.defaultModel, onChange: (event) => update({ defaultModel: event.target.value }) }, h('option', { value: '', disabled: true }, '请选择默认模型'), !validDefault && draft.defaultModel ? h('option', { value: draft.defaultModel, disabled: true }, `${draft.defaultModel}（已禁用，请重选）`) : null, ...enabledModels.map(id => h('option', { key: id, value: id }, models.get(id))))), h('label', { style: field }, '权限模式', h('select', { value: draft.permissionMode, onChange: (event) => update({ permissionMode: event.target.value }) }, !validMode ? h('option', { value: draft.permissionMode, disabled: true }, `未知模式：${draft.permissionMode}`) : null, h('option', { value: 'dontAsk' }, '不询问'), h('option', { value: 'plan' }, '规划模式'), h('option', { value: 'acceptEdits' }, '接受编辑'))), h('label', { style: field }, '默认推理强度', h('select', { value: draft.reasoningEffort, onChange: (event) => update({ reasoningEffort: event.target.value }) }, ...efforts.map(effort => h('option', { key: effort, value: effort }, effort))))), h('div', { style: { ...row, justifyContent: 'space-between' } }, h('div', { style: row }, h('label', { style: { ...row, gap: '4px' } }, h('input', { type: 'checkbox', name: 'dangerouslySkipPermissions', checked: draft.dangerouslySkipPermissions,
+    })), h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '12px', marginBottom: '12px' } }, h('label', { style: field }, '默认模型', h('select', { value: draft.defaultModel, onChange: (event) => update({ defaultModel: event.target.value }) }, h('option', { value: '', disabled: true }, '请选择默认模型'), !validDefault && draft.defaultModel ? h('option', { value: draft.defaultModel, disabled: true }, `${draft.defaultModel}（已禁用，请重选）`) : null, ...enabledModels.map(id => h('option', { key: id, value: id }, models.get(id))))), h('div', { style: field }, h('span', { title: '执行模型遇到 429 时，按选择顺序尝试候选模型，使用同会话续接，不会跨进程重跑；未选择候选或候选耗尽则报错结束。' }, '候选模型'), h('div', { role: 'group', 'aria-label': '候选模型', style: { ...row, gap: '6px' } }, ...[...draft.fallbackModels, ...enabledModels.filter(id => id !== 'default' && !draft.fallbackModels.includes(id))].map(id => {
+        const index = draft.fallbackModels.indexOf(id);
+        return h('button', { key: id, type: 'button', 'aria-label': `候选 ${id}`, 'aria-pressed': index >= 0,
+            style: { padding: '3px 8px', overflowWrap: 'anywhere', ...(index >= 0 ? selectedStyle : {}) },
+            onClick: () => {
+                setDraft(previous => previous ? { ...previous, fallbackModels: previous.fallbackModels.includes(id)
+                        ? previous.fallbackModels.filter(model => model !== id) : [...previous.fallbackModels, id] } : previous);
+                setNotice('');
+            } }, index >= 0 ? `${index + 1} ${models.get(id) ?? id}` : models.get(id));
+    }), !enabledModels.some(id => id !== 'default') ? h('span', { style: { color: secondary } }, '请先启用具体模型') : null)), h('label', { style: field }, '权限模式', h('select', { value: draft.permissionMode, onChange: (event) => update({ permissionMode: event.target.value }) }, !validMode ? h('option', { value: draft.permissionMode, disabled: true }, `未知模式：${draft.permissionMode}`) : null, h('option', { value: 'dontAsk' }, '不询问'), h('option', { value: 'plan' }, '规划模式'), h('option', { value: 'acceptEdits' }, '接受编辑'))), h('label', { style: field }, '默认推理强度', h('select', { value: draft.reasoningEffort, onChange: (event) => update({ reasoningEffort: event.target.value }) }, ...efforts.map(effort => h('option', { key: effort, value: effort }, effort))))), h('div', { style: { ...row, justifyContent: 'space-between' } }, h('div', { style: row }, h('label', { style: { ...row, gap: '4px' } }, h('input', { type: 'checkbox', name: 'dangerouslySkipPermissions', checked: draft.dangerouslySkipPermissions,
         onChange: (event) => update({ dangerouslySkipPermissions: event.target.checked }) }), '跳过 CLI 权限检查'), help('danger', '跳过 CLI 权限检查风险说明', dangerHelp, '危险')), h('button', { type: 'button', disabled: locked || !!status?.settingsError || !validDefault || !validMode || !validEffort, onClick: () => void load('config', draft) }, '保存设置')), !validDefault || !validMode || !validEffort ? h('p', { role: 'alert' }, '请选择有效的权限模式、推理强度与已启用的默认模型。') : null) : null, h('details', { style: box, 'aria-label': '运行记录' }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `运行记录（${status?.runs.length ?? 0}）`), h('p', { style: { fontSize: '12px' } }, '当前进程内存最近 5 条，每 2 秒刷新；不保存提示词或原始输出。'), h('div', { style: { maxHeight: '360px', overflowY: 'auto' } }, ...(status?.runs.length ? status.runs.map(renderRun) : [h('p', null, '暂无运行记录')]))));
 }
 function apply(ctx) {

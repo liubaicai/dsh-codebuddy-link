@@ -45,6 +45,7 @@ interface Config {
   models: string[];
   hiddenModels: string[];
   defaultModel: string;
+  fallbackModels: string[];
   tools: string;
   reasoningEffort: string;
   maxConcurrency: number;
@@ -180,6 +181,11 @@ function parseStatus(value: unknown): Status {
   // Missing fields from older servers keep the safe defaults; reject malformed new values.
   const dangerouslySkipPermissions = c.dangerouslySkipPermissions === undefined ? false : c.dangerouslySkipPermissions;
   if (typeof dangerouslySkipPermissions !== 'boolean') throw new Error('服务端状态格式无效');
+  const rawFallbacks = c.fallbackModels === undefined ? [] : c.fallbackModels;
+  if (!strings(rawFallbacks) || !rawFallbacks.every(isRequestModelIdentifier)) throw new Error('服务端状态格式无效');
+  const hiddenModels = new Set(c.hiddenModels);
+  const enabledModels = new Set(c.models.filter(id => !hiddenModels.has(id)));
+  const fallbackModels = [...new Set(rawFallbacks)].filter(id => id !== 'default' && enabledModels.has(id));
   const reasoningEffort = c.reasoningEffort ?? 'auto';
   const maxConcurrency = c.maxConcurrency ?? 2;
   const queueTimeoutMs = c.queueTimeoutMs ?? 600000;
@@ -189,7 +195,7 @@ function parseStatus(value: unknown): Status {
   return { settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0,
     modelMessage: parseModelMessage(value.modelMessage),
     config: { enabled:c.enabled, permissionMode:c.permissionMode, models:c.models, hiddenModels:c.hiddenModels,
-    defaultModel:c.defaultModel, tools:c.tools, dangerouslySkipPermissions, reasoningEffort, maxConcurrency, queueTimeoutMs, stallWarnMs },
+    defaultModel:c.defaultModel, fallbackModels, tools:c.tools, dangerouslySkipPermissions, reasoningEffort, maxConcurrency, queueTimeoutMs, stallWarnMs },
     account: parseAccount(value.account), accountPool: parsePool(value.accountPool),
     catalogModels: value.catalogModels.map(model => ({id:model.id as string, name:model.name as string})),
     auth: { configured: isRecord(value.auth) && value.auth.configured === true }, runs: parseRuns(value.runs) };
@@ -425,7 +431,7 @@ function SettingsPanel(): unknown {
         const endpoint = action === 'initial' ? 'status' : action;
         const result = await request(endpoint, endpoint === 'status' ? undefined : endpoint === 'models' ? {} : {
           permissionMode: config!.permissionMode, dangerouslySkipPermissions: config!.dangerouslySkipPermissions,
-          models: config!.models, hiddenModels: config!.hiddenModels, defaultModel: config!.defaultModel, reasoningEffort: config!.reasoningEffort,
+          models: config!.models, hiddenModels: config!.hiddenModels, defaultModel: config!.defaultModel, fallbackModels: config!.fallbackModels, reasoningEffort: config!.reasoningEffort,
         });
         if (!current()) return;
         setStatus(result);
@@ -567,6 +573,7 @@ function SettingsPanel(): unknown {
             style:{borderRadius:'16px', overflowWrap:'anywhere', ...(enabled ? selectedStyle : {})},
             onClick:() => update({models:!enabled ? [...new Set([...draft.models, id])] : draft.models,
               hiddenModels:!enabled ? draft.hiddenModels.filter(hidden => hidden !== id) : [...new Set([...draft.hiddenModels, id])],
+              fallbackModels:enabled ? draft.fallbackModels.filter(model => model !== id) : draft.fallbackModels,
               defaultModel:enabled && draft.defaultModel === id ? enabledModels.find(model => model !== id) ?? '' : draft.defaultModel})}, label);
         })),
       h('div', {style:{display:'grid', gridTemplateColumns:'repeat(auto-fit, minmax(150px, 1fr))', gap:'12px', marginBottom:'12px'}},
@@ -574,6 +581,17 @@ function SettingsPanel(): unknown {
           h('option', {value:'', disabled:true}, '请选择默认模型'),
           !validDefault && draft.defaultModel ? h('option', {value:draft.defaultModel, disabled:true}, `${draft.defaultModel}（已禁用，请重选）`) : null,
           ...enabledModels.map(id => h('option', {key:id, value:id}, models.get(id))))),
+        h('div', {style:field}, h('span', {title:'执行模型遇到 429 时，按选择顺序尝试候选模型，使用同会话续接，不会跨进程重跑；未选择候选或候选耗尽则报错结束。'}, '候选模型'),
+          h('div', {role:'group', 'aria-label':'候选模型', style:{...row, gap:'6px'}},
+            ...[...draft.fallbackModels, ...enabledModels.filter(id => id !== 'default' && !draft.fallbackModels.includes(id))].map(id => {
+              const index = draft.fallbackModels.indexOf(id);
+              return h('button', {key:id, type:'button', 'aria-label':`候选 ${id}`, 'aria-pressed':index >= 0,
+                style:{padding:'3px 8px', overflowWrap:'anywhere', ...(index >= 0 ? selectedStyle : {})},
+                onClick:() => {setDraft(previous => previous ? {...previous, fallbackModels:previous.fallbackModels.includes(id)
+                  ? previous.fallbackModels.filter(model => model !== id) : [...previous.fallbackModels, id]} : previous); setNotice('');}},
+                index >= 0 ? `${index + 1} ${models.get(id) ?? id}` : models.get(id));
+            }),
+            !enabledModels.some(id => id !== 'default') ? h('span', {style:{color:secondary}}, '请先启用具体模型') : null)),
         h('label', {style:field}, '权限模式', h('select', {value:draft.permissionMode, onChange:(event:{target:{value:string}}) => update({permissionMode:event.target.value})},
           !validMode ? h('option', {value:draft.permissionMode, disabled:true}, `未知模式：${draft.permissionMode}`) : null,
           h('option', {value:'dontAsk'}, '不询问'), h('option', {value:'plan'}, '规划模式'), h('option', {value:'acceptEdits'}, '接受编辑'))),

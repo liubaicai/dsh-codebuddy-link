@@ -5,6 +5,7 @@ export type BridgeEvent =
   | { type: 'text' | 'reasoning'; delta: string }
   | { type: 'usage'; input: number; output: number; cacheRead: number; cacheWrite: number }
   | { type: 'metadata'; model?: string; totalCredits?: number; totalCostUsd?: number }
+  | { type: 'model-switch'; model: string }
   | { type: 'tool-start'; id: string; name: string; input?: unknown }
   | { type: 'tool-end'; id: string; name?: string; output?: unknown; isError?: boolean }
   | { type: 'result'; sessionId?: string; text: string; structuredOutput?: unknown; partialSuccess?: boolean; partialSuccessMessage?: string };

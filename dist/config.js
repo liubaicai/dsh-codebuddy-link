@@ -61,6 +61,10 @@ export function resolveConfig(entry = {}, env = process.env) {
         }).filter(Boolean))];
     if (cleanModels.some(v => !isRequestModelIdentifier(v)))
         throw new Error('Invalid model id');
+    const fallback = entry.fallbackModels === undefined ? [] : entry.fallbackModels;
+    if (!Array.isArray(fallback) || [...fallback].some(id => !isRequestModelIdentifier(id)))
+        throw new Error('Invalid fallbackModels');
+    const fallbackModels = [...new Set(fallback)];
     const rawModelContext = value('modelContext', 'DSH_CODEBUDDY_MODEL_CONTEXT', {});
     const modelContextSource = typeof rawModelContext === 'string' ? JSON.parse(rawModelContext) : rawModelContext;
     if (!modelContextSource || typeof modelContextSource !== 'object' || Array.isArray(modelContextSource))
@@ -77,7 +81,7 @@ export function resolveConfig(entry = {}, env = process.env) {
     return {
         enabled: bool('enabled', 'DSH_CODEBUDDY_ENABLED', true),
         codebuddyBin: string('codebuddyBin', 'DSH_CODEBUDDY_BIN'),
-        defaultModel: model, models: cleanModels, hiddenModels: [...new Set(hiddenModels)],
+        defaultModel: model, models: cleanModels, hiddenModels: [...new Set(hiddenModels)], fallbackModels,
         workspaceRoot: string('workspaceRoot', 'DSH_CODEBUDDY_WORKSPACE_ROOT'),
         permissionMode: mode, tools: string('tools', 'DSH_CODEBUDDY_TOOLS'),
         executionMode: 'autonomous',

@@ -16,6 +16,8 @@ export interface CodeBuddyRequest {
   dangerouslySkipPermissions?: boolean;
   cwd: string;
   model?: string;
+  /** Ordered, explicit ACP fallback targets; used only for terminal HTTP 429. */
+  fallbackModels?: string[];
   effort?: string;
   /** Internal lifecycle notification; never passed to the CLI. */
   onSpawn?: () => void;

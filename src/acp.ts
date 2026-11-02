@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { AcpUsage } from './acp-usage.ts';
-import { acpLimitError } from './acp-error.ts';
+import { acpLimitError, CodeBuddyLimitError } from './acp-error.ts';
 import { isSessionMetadata } from './acp-messages.ts';
 import { captureAcpDescendants } from './acp-cleanup.ts';
 import { isModelIdentifier } from './metadata.ts';
@@ -46,6 +46,8 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
   if (request.dangerouslySkipPermissions !== undefined && typeof request.dangerouslySkipPermissions !== 'boolean') throw new TypeError('dangerouslySkipPermissions must be boolean');
   if (request.jsonSchema !== undefined) throw new TypeError('JSON schema output is not supported by CodeBuddy ACP');
   if (request.model !== undefined && !isRequestModelIdentifier(request.model)) throw new TypeError('Invalid CodeBuddy request model id');
+  if (request.fallbackModels !== undefined && (!Array.isArray(request.fallbackModels) || [...request.fallbackModels].some(id => id === 'default' || !isRequestModelIdentifier(id)))) throw new TypeError('Invalid CodeBuddy fallback models');
+  const fallbackModels = [...new Set(request.fallbackModels ?? [])];
   const executable = await resolveCodeBuddyBin(request.bin, request.cwd);
   if (request.signal?.aborted) throw abortError();
   const args = [...executable.args, '--acp', '--acp-transport', 'stdio', '--tools', 'default', '--no-session-persistence'];
@@ -54,7 +56,11 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
   for (const [flag, value] of [['--system-prompt', request.systemPrompt], ['--append-system-prompt', request.appendSystemPrompt], ['--model', request.model], ['--effort', request.effort]] as const) {
     if (value !== undefined) args.push(flag, value);
   }
-  const child = spawn(executable.command, args, { cwd: request.cwd, env: childEnv(request.authToken), shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
+  const env = childEnv(request.authToken);
+  // Native job identities can make set_model persist an agent's respawn/profile
+  // preferences. This bridge owns a fresh task, never a parent CLI job.
+  for (const key of Object.keys(env)) if (key.toUpperCase() === 'CODEBUDDY_JOB_ID') delete env[key];
+  const child = spawn(executable.command, args, { cwd: request.cwd, env, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'] });
   const decoder = new NdjsonDecoder(MAX_FRAME_BYTES);
   const pending = new Map<RpcId, { method: string; resolve(value: unknown): void; reject(error: Error): void }>();
   const queue: { event: BridgeEvent; bytes: number }[] = [];
@@ -239,6 +245,7 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
     if (owns(value, 'error')) {
       if (!object(value.error) || !Number.isSafeInteger(value.error.code) || typeof value.error.message !== 'string') throw protocolError();
       pending.delete(value.id);
+      if (entry.method === 'session/prompt') { promptResponded = true; clearTimeout(timer); }
       // Keep authentication routing authoritative; classify only the explicit
       // RPC error surface for quota/rate limits without relaying server secrets.
       const cause = value.error.code === -32000
@@ -292,7 +299,8 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
   // Only validated text/thought/tool progress and matched setup replies renew
   // this watchdog: stderr, partial frames and unrelated metadata cannot keep a
   // stalled task alive. Explicit cancellation and bounded cleanup stay unchanged.
-  const timer = setTimeout(() => fail(Object.assign(new Error(`CodeBuddy ACP request timed out after ${timeoutMs}ms without progress`), { name: 'TimeoutError' })), timeoutMs);
+  const onTimeout = (): void => fail(Object.assign(new Error(`CodeBuddy ACP request timed out after ${timeoutMs}ms without progress`), { name: 'TimeoutError' }));
+  let timer = setTimeout(onTimeout, timeoutMs);
   request.signal?.addEventListener('abort', onAbort, { once: true });
   child.once('spawn', onSpawn);
   child.on('error', onProcessError);
@@ -318,28 +326,63 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
       if (typeof models.currentModelId === 'string' && request.model && models.currentModelId !== request.model) throw new Error('CodeBuddy ACP selected a different model than requested');
       if (isModelIdentifier(models.currentModelId)) push({type:'metadata',model:models.currentModelId});
       if (failure) throw failure;
-      const result = await rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text: request.prompt }] });
-      if (!object(result) || typeof result.stopReason !== 'string') throw protocolError();
-      const resultMeta = object(result._meta) ? result._meta : {};
-      const outcome = resultMeta['codebuddy.ai/outcome'];
-      // CLI outcome is a task-quality summary: even recovered/local tool errors
-      // can produce PARTIAL_SUCCESS alongside a completed final answer. Accept
-      // only this known nonfatal outcome; the stopReason check still applies.
-      const limitError = acpLimitError(resultMeta['codebuddy.ai/errorMessage']);
-      if (outcome !== undefined && outcome !== 'SUCCESS' && outcome !== 'PARTIAL_SUCCESS') throw limitError ?? new Error('CodeBuddy ACP reported an unsuccessful outcome');
-      if (result.stopReason !== 'end_turn') {
-        if (limitError) throw limitError;
-        const reasons: Record<string, string> = { cancelled: 'cancelled', refusal: 'refused', max_tokens: 'stopped at the token limit', max_turn_requests: 'stopped at the turn limit' };
-        const reason = owns(reasons, result.stopReason) ? reasons[result.stopReason] : 'stopped without end_turn';
-        throw new Error(`CodeBuddy ACP request ${reason}`);
+      const attempted = new Set<string>([request.model, models.currentModelId].filter((id): id is string => typeof id === 'string'));
+      let prompt = request.prompt;
+      let switches = 0;
+      while (true) {
+        try {
+          const result = await rpc('session/prompt', { sessionId, prompt: [{ type: 'text', text: prompt }] });
+          if (!object(result) || typeof result.stopReason !== 'string') throw protocolError();
+          const resultMeta = object(result._meta) ? result._meta : {};
+          const outcome = resultMeta['codebuddy.ai/outcome'];
+          // Native cancellation is authoritative even when an old quota error is
+          // still attached. Never start another prompt after any cancellation.
+          if (result.stopReason === 'cancelled' || outcome === 'CANCELLED') throw abortError();
+          // Completed partial answers can contain historical model errors. Do not
+          // rerun a completed task solely because it retains an old 429 diagnostic.
+          const limitError = acpLimitError(resultMeta['codebuddy.ai/errorMessage']);
+          if (outcome !== undefined && outcome !== 'SUCCESS' && outcome !== 'PARTIAL_SUCCESS') throw limitError ?? new Error('CodeBuddy ACP reported an unsuccessful outcome');
+          if (result.stopReason !== 'end_turn') {
+            if (limitError) throw limitError;
+            const reasons: Record<string, string> = { cancelled: 'cancelled', refusal: 'refused', max_tokens: 'stopped at the token limit', max_turn_requests: 'stopped at the turn limit' };
+            const reason = owns(reasons, result.stopReason) ? reasons[result.stopReason] : 'stopped without end_turn';
+            throw new Error(`CodeBuddy ACP request ${reason}`);
+          }
+          partialSuccess = outcome === 'PARTIAL_SUCCESS';
+          if (partialSuccess && !output.trim()) throw limitError ?? new Error('CodeBuddy ACP reported partial success without a final answer');
+          if (partialSuccess) partialSuccessMessage = limitError?.message;
+          finished = true;
+          notify();
+          break;
+        } catch (error) {
+          // Keep the process, account lease and native tool history. Never restart
+          // the original task in a new session or replay tools through DSH.
+          if (failure || stopping || request.signal?.aborted) throw failure ?? abortError();
+          if (!(error instanceof CodeBuddyLimitError) || error.status !== 429) throw error;
+          const nextModel = fallbackModels.find(id => !attempted.has(id));
+          if (!nextModel) {
+            if (switches) error.message += ' 已尝试所有候选模型，任务已停止。';
+            throw error;
+          }
+          attempted.add(nextModel);
+          // Completion suspended the watchdog. Bound set_model too, while still
+          // rejecting late execution frames between prompt rounds.
+          clearTimeout(timer);
+          timer = setTimeout(onTimeout, timeoutMs);
+          const switched = await rpc('session/set_model', { sessionId, modelId: nextModel });
+          if (!object(switched) || switched.modelId !== nextModel) throw new Error('CodeBuddy 未确认候选模型切换，已停止任务以避免重复执行。');
+          if (failure || stopping || request.signal?.aborted) throw failure ?? abortError();
+          switches++;
+          output = ''; tools.clear(); partialSuccess = false; partialSuccessMessage = undefined;
+          push({ type: 'model-switch', model: nextModel });
+          push({ type: 'metadata', model: nextModel });
+          // Official CLI keeps committed tool history on terminal prompt errors.
+          // This is a new user turn in that same session, not an exact token resume.
+          prompt = '上一次请求因 HTTP 429 中断，已切换模型。请根据当前会话历史继续尚未完成的原任务，不要重复已经完成的工具操作；如果任务已经完成，直接总结结果。';
+          promptResponded = false;
+          progress();
+        }
       }
-      partialSuccess = outcome === 'PARTIAL_SUCCESS';
-      if (partialSuccess && !output.trim()) throw limitError ?? new Error('CodeBuddy ACP reported partial success without a final answer');
-      // A completed partial answer is still useful; describe its explicit error
-      // without promoting recovered/historical model errors to a fatal failure.
-      if (partialSuccess) partialSuccessMessage = limitError?.message;
-      finished = true;
-      notify();
     } catch (error) { fail(error instanceof Error ? error : new Error('CodeBuddy ACP request failed')); }
   })();
   let finalResult: Extract<BridgeEvent, { type: 'result' }> | undefined;

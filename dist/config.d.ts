@@ -7,6 +7,8 @@ export interface PluginConfig {
     defaultModel: string;
     models: string[];
     hiddenModels: string[];
+    /** Ordered alternatives for same-session continuation after rate limiting. */
+    fallbackModels: string[];
     workspaceRoot: string;
     permissionMode: 'dontAsk' | 'plan' | 'acceptEdits';
     tools: string;

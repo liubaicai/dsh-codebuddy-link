@@ -13,6 +13,9 @@ export type BridgeEvent = {
     totalCredits?: number;
     totalCostUsd?: number;
 } | {
+    type: 'model-switch';
+    model: string;
+} | {
     type: 'tool-start';
     id: string;
     name: string;

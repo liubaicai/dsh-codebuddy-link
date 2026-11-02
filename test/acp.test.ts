@@ -483,7 +483,7 @@ test('failed and unknown outcomes remain failures even with an answer and end_tu
     const f = await fixture(t);
     const events: BridgeEvent[] = [];
     await assert.rejects(async()=>{for await(const event of runCodeBuddyAcp({...f,prompt:`outcome:${outcome}`}))events.push(event)},
-      {message:'CodeBuddy ACP reported an unsuccessful outcome'});
+      outcome === 'CANCELLED' ? {name:'AbortError'} : {message:'CodeBuddy ACP reported an unsuccessful outcome'});
     assert.ok(!events.some(event=>event.type==='result'));
   }
 });

@@ -43,6 +43,13 @@ test('account credits, model usage and unknown quota causes are not conflated', 
   assert.notEqual(unknown.code,'QUOTA', 'DSH replaces QUOTA with generic copy and hides reset details');
 });
 
+test('HTTP status text is explicit and unrelated 429 numbers never authorize continuation', () => {
+  for (const value of ['HTTP 429', 'request failed with status code: 429', 'HTTP/1.1 429 Too Many Requests']) assert.equal(acpLimitError(value)?.status,429);
+  assert.equal(acpLimitError({code:-32603,message:'internal failure, request id 429'}),undefined);
+  assert.equal(acpLimitError({data:{category:'quota'},message:'remaining quota 429'})?.status,undefined);
+  assert.equal(acpLimitError({data:{statusCode:403,category:'quota'},message:'HTTP 429'})?.status,403);
+})
+
 test('unlabelled, invalid or timezone-less dates are not advertised as reset times', () => {
   for (const detail of [reset, '将在 2026-02-30 21:15:47 UTC+8 重置', '将在 2026-11-02 25:15:47 UTC+8 重置', '将在 2026-11-02 21:15:47 重置', '将在 2026-11-02 21:15:47 UTC+99 重置', '将在 2026-11-02 21:15:47 UTC+14:59 重置']) {
     assert.doesNotMatch(acpLimitError(quota(detail))!.message, /2026-/);

@@ -158,6 +158,38 @@ test('compact account list shows quota precisely and has no removed controls or 
   assert.doesNotMatch(code, /auth\/(?:import|clear)|authContent|customModel/);
 });
 
+test('fallback buttons preserve click order, re-add last, prune hidden models and save the order', async () => {
+  const response = payload();
+  response.config.models.push('default');
+  const app = mounted([{value:response}, {value:response}]); app.render(); await settle();
+  const candidate = (id:string) => nodes(app.render()).find(node => node.props['aria-label'] === `候选 ${id}`)!;
+  assert.equal(candidate('hidden'), undefined); assert.equal(candidate('default'), undefined);
+  assert.equal(nodes(app.render()).some(node => node.type === 'select' && node.props.multiple), false);
+  const help = nodes(app.render()).find(node => node.children.includes('候选模型') && node.props.title)!;
+  assert.match(help.props.title, /429.*选择顺序.*同会话续接.*不会跨进程重跑.*未选择.*耗尽.*报错结束/);
+  candidate('custom').props.onClick(); candidate('basic').props.onClick();
+  assert.equal(content(candidate('custom')), '1 custom'); assert.equal(content(candidate('basic')), '2 基础模型');
+  candidate('custom').props.onClick(); candidate('custom').props.onClick();
+  assert.equal(content(candidate('basic')), '1 基础模型'); assert.equal(content(candidate('custom')), '2 custom');
+  button(app.render(), '保存设置').props.onClick(); await settle();
+  assert.deepEqual(JSON.parse(app.calls.at(-1)!.init.body).fallbackModels, ['basic', 'custom']);
+  candidate('custom').props.onClick(); modelChip(app.render(), 'custom').props.onClick();
+  assert.equal(candidate('custom'), undefined);
+  modelChip(app.render(), 'custom').props.onClick();
+  assert.equal(candidate('custom').props['aria-pressed'], false);
+});
+
+test('fallback DTO validates IDs, defaults older servers and removes stale choices', async () => {
+  for (const value of [null, 'basic', ['bad/path'], [' basic'], [1]]) {
+    const app = mounted([{value:{...payload(), config:{...payload().config, fallbackModels:value}}}]);
+    app.render(); await settle(); assert.match(content(app.render()), /服务端状态格式无效/);
+  }
+  const app = mounted([{value:{...payload(), config:{...payload().config, fallbackModels:['hidden', 'missing', 'custom', 'custom', 'basic']}}}]);
+  app.render(); await settle();
+  const selected = nodes(app.render()).filter(node => String(node.props['aria-label']).startsWith('候选 ') && node.props['aria-pressed']);
+  assert.deepEqual(selected.map(node => content(node)), ['1 custom', '2 基础模型']);
+});
+
 test('settings use semantic theme with Radix fallbacks, compact borders and legible fonts', async () => {
   const app = mounted(); app.render(); await settle(); const tree = app.render();
   assert.equal(tree.props.style.color, 'var(--dsw-alias-label-primary, var(--gray-12, inherit))');
@@ -217,7 +249,7 @@ test('managed ready account supersedes legacy quota gate; empty and unauthentica
   }
 });
 
-test('discovered model chips toggle visibility and save only the six editable settings', async () => {
+test('discovered model chips toggle visibility and save only the seven editable settings', async () => {
   const discovered = {...payload(), catalogModels:[...payload().catalogModels, {id:'discovered-id', name:'Discovered'}]};
   const app = mounted([{value:payload()}, {value:discovered}, {value:discovered}]); app.render(); await settle();
   button(app.render(), '获取模型列表').props.onClick(); await settle();
@@ -231,7 +263,7 @@ test('discovered model chips toggle visibility and save only the six editable se
   const save = button(app.render(), '保存设置'); save.props.onClick(); save.props.onClick(); await settle();
   assert.equal(app.calls.length, 5);
   assert.deepEqual(JSON.parse(app.calls[4]!.init.body), {permissionMode:'acceptEdits', dangerouslySkipPermissions:false,
-    models:['basic','hidden','custom','discovered-id'], hiddenModels:['hidden','basic'], defaultModel:'discovered-id', reasoningEffort:'ultracode'});
+    models:['basic','hidden','custom','discovered-id'], hiddenModels:['hidden','basic'], defaultModel:'discovered-id', fallbackModels:[], reasoningEffort:'ultracode'});
   assert.match(content(app.render()), /设置已保存/);
 });
 
@@ -240,7 +272,7 @@ test('removed runtime settings and tools survive save by being omitted, not rese
   const app = mounted([{value:response}, {value:response}]); app.render(); await settle();
   button(app.render(), '保存设置').props.onClick(); await settle();
   const saved = JSON.parse(app.calls[3]!.init.body);
-  assert.deepEqual(Object.keys(saved).sort(), ['models','hiddenModels','defaultModel','permissionMode','reasoningEffort','dangerouslySkipPermissions'].sort());
+  assert.deepEqual(Object.keys(saved).sort(), ['models','hiddenModels','defaultModel','fallbackModels','permissionMode','reasoningEffort','dangerouslySkipPermissions'].sort());
   assert.equal(saved.reasoningEffort, 'high');
   assert.equal(app.state[1].tools, 'CustomTool'); assert.equal(app.state[1].maxConcurrency, 7);
 });

@@ -113,7 +113,10 @@ export class CodeBuddyAdapter extends LlmAdapter {
                 model: (options.model || cfg.defaultModel) === 'default' ? undefined : (options.model || cfg.defaultModel),
                 effort: resolveEffort(options.reasoningEffort, cfg.reasoningEffort),
                 permissionMode: autonomous ? cfg.permissionMode : 'dontAsk', tools: autonomous ? 'default' : '',
-                ...(autonomous ? { dangerouslySkipPermissions: cfg.dangerouslySkipPermissions } : {}),
+                ...(autonomous ? {
+                    dangerouslySkipPermissions: cfg.dangerouslySkipPermissions,
+                    fallbackModels: cfg.fallbackModels.filter(id => id !== 'default' && id !== selectedModel && cfg.models.includes(id) && !cfg.hiddenModels.includes(id)),
+                } : {}),
                 timeoutMs: cfg.timeoutMs, signal: options.signal, authToken: await this.resolveAuthToken(),
             }, 'model', this.runner ?? (autonomous ? runCodeBuddyAcp : runCodeBuddy))) {
                 if (event.type === 'text') {
@@ -134,6 +137,14 @@ export class CodeBuddyAdapter extends LlmAdapter {
                             yield* append('reasoning', '\n[CodeBuddy 正在生成，完整内容将在完成后显示]\n');
                         }
                     }
+                }
+                else if (event.type === 'model-switch') {
+                    // The CLI retains native history; only discard the failed answer preview.
+                    rawText = '';
+                    resultText = '';
+                    previewRemaining = 1024;
+                    previewTruncated = false;
+                    yield* append('reasoning', `\n[CodeBuddy 遇到 HTTP 429，已切换至 ${event.model}，继续当前任务]\n`);
                 }
                 else if (event.type === 'reasoning')
                     yield* append('reasoning', event.delta);
@@ -175,7 +186,8 @@ export class CodeBuddyAdapter extends LlmAdapter {
             const failure = error instanceof CodeBuddyLimitError
                 ? { code: error.code, message, ...(error.status !== undefined ? { status: error.status } : {}) }
                 : { code: 'CODEBUDDY_ERROR', message };
-            yield { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: options.signal?.aborted ? { code: 'ABORTED', message } : failure } };
+            const aborted = options.signal?.aborted || error instanceof Error && error.name === 'AbortError';
+            yield { type: 'finish', reason: { kind: aborted ? 'aborted' : 'error', failure: aborted ? { code: 'ABORTED', message } : failure } };
         }
     }
 }

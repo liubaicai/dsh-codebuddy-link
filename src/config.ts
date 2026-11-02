@@ -12,6 +12,8 @@ export interface PluginConfig {
   defaultModel: string
   models: string[]
   hiddenModels: string[]
+  /** Ordered alternatives for same-session continuation after rate limiting. */
+  fallbackModels: string[]
   workspaceRoot: string
   permissionMode: 'dontAsk' | 'plan' | 'acceptEdits'
   tools: string
@@ -75,6 +77,9 @@ export function resolveConfig(entry: Record<string, unknown> = {}, env = process
     return v.trim()
   }).filter(Boolean))]
   if (cleanModels.some(v => !isRequestModelIdentifier(v))) throw new Error('Invalid model id')
+  const fallback = entry.fallbackModels === undefined ? [] : entry.fallbackModels
+  if (!Array.isArray(fallback) || [...fallback].some(id => !isRequestModelIdentifier(id))) throw new Error('Invalid fallbackModels')
+  const fallbackModels = [...new Set<string>(fallback)]
   const rawModelContext = value('modelContext', 'DSH_CODEBUDDY_MODEL_CONTEXT', {})
   const modelContextSource = typeof rawModelContext === 'string' ? JSON.parse(rawModelContext) : rawModelContext
   if (!modelContextSource || typeof modelContextSource !== 'object' || Array.isArray(modelContextSource)) throw new Error('modelContext must be an object')
@@ -88,7 +93,7 @@ export function resolveConfig(entry: Record<string, unknown> = {}, env = process
   return {
     enabled: bool('enabled', 'DSH_CODEBUDDY_ENABLED', true),
     codebuddyBin: string('codebuddyBin', 'DSH_CODEBUDDY_BIN'),
-    defaultModel: model, models: cleanModels, hiddenModels: [...new Set(hiddenModels)],
+    defaultModel: model, models: cleanModels, hiddenModels: [...new Set(hiddenModels)], fallbackModels,
     workspaceRoot: string('workspaceRoot', 'DSH_CODEBUDDY_WORKSPACE_ROOT'),
     permissionMode: mode, tools: string('tools', 'DSH_CODEBUDDY_TOOLS'),
     executionMode: 'autonomous',
