@@ -5,6 +5,7 @@ import { resolveConfig } from '../src/config.ts'
 import { CallRuntime } from '../src/runtime.ts'
 import { runCodeBuddy } from '../src/runner.ts'
 import { runCodeBuddyAcp } from '../src/acp.ts'
+import { acpLimitError } from '../src/acp-error.ts'
 import { join } from 'node:path'
 import { buildPrompt, parseResponse } from '../src/prompt.ts'
 import type { GenerateOptions, Message, ReasoningEffortId, StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -103,6 +104,38 @@ test('partial success keeps the full answer with a visible fixed warning and nev
   assert.ok(out.some(c=>c.type==='usage' && c.usage.inputTokens===10))
   assert.equal(calls,1)
   assertNoReplay(out)
+})
+
+test('quota failures and partial warnings show the safe reason and model-switch advice', async () => {
+  const error = acpLimitError(JSON.stringify({code:-32003,message:'Quota exceeded SECRET_TOKEN',data:{category:'quota',statusCode:429}}))!
+  for (const partial of [false,true]) {
+    let calls = 0
+    const runner: Runner = async function* () {
+      calls++
+      yield {type:'reasoning',delta:'thinking'}
+      yield {type:'usage',input:10,output:5,cacheRead:0,cacheWrite:0}
+      if (!partial) throw error
+      yield {type:'result',text:'完整答案',partialSuccess:true,partialSuccessMessage:error.message}
+    }
+    const out = await collect(new CodeBuddyAdapter(providerConfig(),runner).stream(options))
+    const finish = out.at(-1)
+    assert.ok(finish?.type==='finish')
+    assert.equal(out.filter(chunk=>chunk.type==='finish').length,1)
+    assert.equal(calls,1)
+    assert.ok(out.some(chunk=>chunk.type==='usage'))
+    if (partial) {
+      assert.equal(finish.reason.kind,'stop')
+      const text = out.filter(chunk=>chunk.type==='text-delta').map(chunk=>chunk.text).join('')
+      assert.match(text,/CodeBuddy 部分成功：.*配额已用尽（429）.*切换其他模型/)
+      assert.ok(text.endsWith('完整答案'))
+    } else {
+      assert.ok(finish.reason.kind==='error')
+      assert.deepEqual(finish.reason.failure,{code:'QUOTA',status:429,message:error.message})
+      assert.equal(out.some(chunk=>chunk.type==='text-delta'),false)
+    }
+    assert.doesNotMatch(JSON.stringify(out),/SECRET_TOKEN/)
+    assert.equal(out.some(chunk=>chunk.type==='tool-call-delta'),false)
+  }
 })
 
 test('failure after a partial result never publishes a warning or a completed answer', async () => {

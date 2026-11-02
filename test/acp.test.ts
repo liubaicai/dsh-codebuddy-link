@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { getEventListeners } from 'node:events';
 import { runCodeBuddyAcp } from '../src/acp.ts';
+import { CodeBuddyLimitError } from '../src/acp-error.ts';
 import type { BridgeEvent } from '../src/protocol.ts';
 
 // This process speaks only ACP and deliberately keeps running after end_turn.
@@ -46,6 +47,11 @@ input.on('line', line => {
  }
  if (row.method !== 'session/prompt') return;
  mode = row.params.prompt[0].text;
+ if (mode === 'limit') {
+  const failure=JSON.parse(readFileSync('failure.json','utf8'));
+  if(failure.answer)text(failure.answer);
+  return send({jsonrpc:'2.0',id:row.id,...(failure.error ? {error:failure.error} : {result:failure.result})});
+ }
  if (mode === 'error' || mode === 'auth') return send({jsonrpc:'2.0',id:row.id,error:{code:mode==='auth'?-32000:-32603,message:'SECRET_TOKEN https://private.invalid',data:{token:'SECRET_TOKEN'}}});
  if (mode === 'malformed') return process.stdout.write('SECRET_TOKEN not json\n');
  if (mode === 'oversized') return process.stdout.write('x'.repeat(8*1024*1024+1));
@@ -411,6 +417,45 @@ test('server errors, malformed frames, invalid RPC, oversized frames and early e
     const f = await fixture(t);
     await assert.rejects(collect(runCodeBuddyAcp({ ...f, prompt })), error => error instanceof Error && !/SECRET_TOKEN|private\.invalid/.test(error.message), prompt);
     await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));
+  }
+});
+
+test('ACP quota and rate-limit errors keep actionable diagnostics across RPC, failed and partial results', {timeout:30000}, async t => {
+  const quota = {code:-32003,message:'Quota exceeded',data:{category:'quota',statusCode:429,code:6000,details:'429 您的使用量已超出频率限制，将在 2026-11-02 21:15:47 UTC+8 重置 SECRET_TOKEN https://private.invalid'}};
+  for (const variant of ['rpc','failed','rate','partial','recovered']) {
+    const f = await fixture(t);
+    const errorMessage = variant==='rate' ? '429 Too Many Requests SECRET_TOKEN' : JSON.stringify(quota);
+    const outcome = variant==='recovered' ? 'SUCCESS' : variant==='partial' ? 'PARTIAL_SUCCESS' : 'FAILED_MODEL_REQUEST';
+    const result = {stopReason:['partial','recovered'].includes(variant)?'end_turn':'refusal',_meta:{'codebuddy.ai/outcome':outcome,'codebuddy.ai/errorMessage':errorMessage}};
+    await writeFile(join(f.cwd,'failure.json'),JSON.stringify({answer:'完整答案',...(variant==='rpc'?{error:quota}:{result})}));
+    if (variant==='partial' || variant==='recovered') {
+      const events = await collect(runCodeBuddyAcp({...f,prompt:'limit'}));
+      const last = events.at(-1);
+      assert.ok(last?.type==='result');
+      assert.equal(last.text,'完整答案');
+      if (variant==='partial') {
+        assert.equal(last.partialSuccess,true);
+        assert.match(last.partialSuccessMessage!, /配额已用尽（429）.*切换其他模型/);
+        assert.doesNotMatch(last.partialSuccessMessage!, /SECRET_TOKEN|private\.invalid/);
+      } else {
+        assert.equal(last.partialSuccess,undefined);
+        assert.equal(last.partialSuccessMessage,undefined);
+      }
+    } else {
+      const events: BridgeEvent[] = [];
+      await assert.rejects(async()=>{for await(const event of runCodeBuddyAcp({...f,prompt:'limit'}))events.push(event);},error=>{
+        assert.ok(error instanceof CodeBuddyLimitError);
+        assert.equal(error.status,429);
+        assert.equal(error.code,variant==='rate'?'CODEBUDDY_RATE_LIMIT':'QUOTA');
+        assert.match(error.message,/切换其他模型/);
+        if(variant!=='rate')assert.match(error.message,/2026-11-02 21:15:47 UTC\+8/);
+        assert.doesNotMatch(error.message,/SECRET_TOKEN|private\.invalid/);
+        return true;
+      });
+      assert.equal(events.some(event=>event.type==='result'),false);
+    }
+    assert.equal((await wire(f.cwd)).filter(row=>row.method==='session/prompt').length,1);
+    await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
   }
 });
 

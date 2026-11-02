@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { AcpUsage } from "./acp-usage.js";
+import { acpLimitError } from "./acp-error.js";
 import { isSessionMetadata } from "./acp-messages.js";
 import { captureAcpDescendants } from "./acp-cleanup.js";
 import { isModelIdentifier } from "./metadata.js";
@@ -79,6 +80,7 @@ export async function* runCodeBuddyAcp(request) {
     let failure;
     let finished = false;
     let partialSuccess = false;
+    let partialSuccessMessage;
     let promptResponded = false;
     let closed = false;
     let resolveClosed;
@@ -315,10 +317,11 @@ export async function* runCodeBuddyAcp(request) {
             if (!object(value.error) || !Number.isSafeInteger(value.error.code) || typeof value.error.message !== 'string')
                 throw protocolError();
             pending.delete(value.id);
-            // ACP standard authentication-required error; never classify message text.
-            const cause = new Error(value.error.code === -32000 ? 'CodeBuddy account requires authorization' : 'CodeBuddy ACP request failed (server error details omitted)');
-            if (value.error.code === -32000)
-                cause.name = 'CodeBuddyAuthError';
+            // Keep authentication routing authoritative; classify only the explicit
+            // RPC error surface for quota/rate limits without relaying server secrets.
+            const cause = value.error.code === -32000
+                ? Object.assign(new Error('CodeBuddy account requires authorization'), { name: 'CodeBuddyAuthError' })
+                : acpLimitError(value.error) ?? new Error('CodeBuddy ACP request failed (server error details omitted)');
             entry.reject(cause);
         }
         else {
@@ -434,16 +437,23 @@ export async function* runCodeBuddyAcp(request) {
             // CLI outcome is a task-quality summary: even recovered/local tool errors
             // can produce PARTIAL_SUCCESS alongside a completed final answer. Accept
             // only this known nonfatal outcome; the stopReason check still applies.
+            const limitError = acpLimitError(resultMeta['codebuddy.ai/errorMessage']);
             if (outcome !== undefined && outcome !== 'SUCCESS' && outcome !== 'PARTIAL_SUCCESS')
-                throw new Error('CodeBuddy ACP reported an unsuccessful outcome');
+                throw limitError ?? new Error('CodeBuddy ACP reported an unsuccessful outcome');
             if (result.stopReason !== 'end_turn') {
+                if (limitError)
+                    throw limitError;
                 const reasons = { cancelled: 'cancelled', refusal: 'refused', max_tokens: 'stopped at the token limit', max_turn_requests: 'stopped at the turn limit' };
                 const reason = owns(reasons, result.stopReason) ? reasons[result.stopReason] : 'stopped without end_turn';
                 throw new Error(`CodeBuddy ACP request ${reason}`);
             }
             partialSuccess = outcome === 'PARTIAL_SUCCESS';
             if (partialSuccess && !output.trim())
-                throw new Error('CodeBuddy ACP reported partial success without a final answer');
+                throw limitError ?? new Error('CodeBuddy ACP reported partial success without a final answer');
+            // A completed partial answer is still useful; describe its explicit error
+            // without promoting recovered/historical model errors to a fatal failure.
+            if (partialSuccess)
+                partialSuccessMessage = limitError?.message;
             finished = true;
             notify();
         }
@@ -486,7 +496,7 @@ export async function* runCodeBuddyAcp(request) {
         }
         if (failure)
             throw failure;
-        finalResult = { type: 'result', sessionId, text: output, ...(partialSuccess ? { partialSuccess: true } : {}) };
+        finalResult = { type: 'result', sessionId, text: output, ...(partialSuccess ? { partialSuccess: true } : {}), ...(partialSuccessMessage ? { partialSuccessMessage } : {}) };
     }
     catch (error) {
         primaryError = error;

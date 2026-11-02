@@ -29,6 +29,7 @@ export type BridgeEvent = {
     text: string;
     structuredOutput?: unknown;
     partialSuccess?: boolean;
+    partialSuccessMessage?: string;
 };
 /** Incremental UTF-8 NDJSON framing. Final unterminated lines are valid. */
 export declare class NdjsonDecoder {

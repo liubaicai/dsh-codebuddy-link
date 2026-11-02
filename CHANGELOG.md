@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Preserve actionable ACP quota/429 diagnostics from structured RPC errors and CodeBuddy outcome metadata. Show model-switch/retry advice and validated reset timestamps without exposing upstream secrets; retain safe failure codes/status in DSH.
+- Explain explicit quota/rate-limit causes in completed partial-answer warnings without turning recovered successful tasks into failures. Do not automatically retry, switch models or replay native operations.
+
 ## 0.3.27
 
 - Return model catalogs without waiting for models.dev. Use cached context metadata or the bundled snapshot immediately, refresh anonymously in the background, and coalesce requests with bounded retries.

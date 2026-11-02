@@ -6,6 +6,7 @@ import { CallRuntime } from "./runtime.js";
 import { autonomousSystemPrompt, buildPrompt, buildSystemPrompt } from "./prompt.js";
 import { runCodeBuddy } from "./runner.js";
 import { runCodeBuddyAcp } from "./acp.js";
+import { CodeBuddyLimitError } from "./acp-error.js";
 export { CODEBUDDY_EFFORTS } from "./config.js";
 const EFFORT_LABELS = { auto: 'CLI 默认', minimal: '极简', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最大', ultracode: 'ultracode' };
 export class CodeBuddyAdapter extends LlmAdapter {
@@ -76,6 +77,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
         let previewTruncated = false;
         let resultText = '';
         let partialSuccess = false;
+        let partialSuccessMessage;
         let usage;
         let sessionId;
         const close = () => {
@@ -147,12 +149,15 @@ export class CodeBuddyAdapter extends LlmAdapter {
                     sessionId = event.sessionId;
                     resultText = event.text;
                     partialSuccess = event.partialSuccess === true;
+                    partialSuccessMessage = event.partialSuccessMessage;
                 }
             }
-            // Put the fixed warning in the visible final answer, not only the collapsed
-            // reasoning preview. Never expose upstream error text or replay native work.
+            // Put the warning in the visible final answer, not only collapsed reasoning.
+            // The ACP boundary supplies fixed safe copy, never raw upstream errors.
             if (autonomous && partialSuccess)
-                yield* append('text', '> CodeBuddy 部分成功：执行过程中出现错误，以下为已生成的答案，请核对相关结论。\n\n');
+                yield* append('text', partialSuccessMessage
+                    ? `> CodeBuddy 部分成功：${partialSuccessMessage}\n> 以下为已生成的答案，请核对相关结论。\n\n`
+                    : '> CodeBuddy 部分成功：执行过程中出现错误，以下为已生成的答案，请核对相关结论。\n\n');
             if (autonomous)
                 yield* append('text', resultText || rawText);
             else if (!rawText && resultText)
@@ -167,7 +172,10 @@ export class CodeBuddyAdapter extends LlmAdapter {
             if (usage)
                 yield { type: 'usage', usage };
             const message = error instanceof Error ? error.message : String(error);
-            yield { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: { code: options.signal?.aborted ? 'ABORTED' : 'CODEBUDDY_ERROR', message } } };
+            const failure = error instanceof CodeBuddyLimitError
+                ? { code: error.code, message, ...(error.status !== undefined ? { status: error.status } : {}) }
+                : { code: 'CODEBUDDY_ERROR', message };
+            yield { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: options.signal?.aborted ? { code: 'ABORTED', message } : failure } };
         }
     }
 }

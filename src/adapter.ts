@@ -6,6 +6,7 @@ import { CallRuntime } from './runtime.ts'
 import { autonomousSystemPrompt, buildPrompt, buildSystemPrompt } from './prompt.ts'
 import { runCodeBuddy } from './runner.ts'
 import { runCodeBuddyAcp } from './acp.ts'
+import { CodeBuddyLimitError } from './acp-error.ts'
 
 export type Runner = typeof runCodeBuddy
 
@@ -63,6 +64,7 @@ export class CodeBuddyAdapter extends LlmAdapter {
     let previewTruncated = false
     let resultText = ''
     let partialSuccess = false
+    let partialSuccessMessage: string | undefined
     let usage: TokenUsage | undefined
     let sessionId: string | undefined
     const close = (): StreamChunk[] => {
@@ -118,11 +120,13 @@ export class CodeBuddyAdapter extends LlmAdapter {
           yield* append('reasoning', `\n[CodeBuddy ${event.type === 'tool-start' ? '执行' : event.isError ? '失败' : '完成'}: ${name}]\n`)
         }
         else if (event.type === 'usage') usage = { inputTokens: event.input, outputTokens: event.output, cacheReadTokens: event.cacheRead, cacheWriteTokens: event.cacheWrite }
-        else if (event.type === 'result') { sessionId = event.sessionId; resultText = event.text; partialSuccess = event.partialSuccess === true }
+        else if (event.type === 'result') { sessionId = event.sessionId; resultText = event.text; partialSuccess = event.partialSuccess === true; partialSuccessMessage = event.partialSuccessMessage }
       }
-      // Put the fixed warning in the visible final answer, not only the collapsed
-      // reasoning preview. Never expose upstream error text or replay native work.
-      if (autonomous && partialSuccess) yield* append('text', '> CodeBuddy 部分成功：执行过程中出现错误，以下为已生成的答案，请核对相关结论。\n\n')
+      // Put the warning in the visible final answer, not only collapsed reasoning.
+      // The ACP boundary supplies fixed safe copy, never raw upstream errors.
+      if (autonomous && partialSuccess) yield* append('text', partialSuccessMessage
+        ? `> CodeBuddy 部分成功：${partialSuccessMessage}\n> 以下为已生成的答案，请核对相关结论。\n\n`
+        : '> CodeBuddy 部分成功：执行过程中出现错误，以下为已生成的答案，请核对相关结论。\n\n')
       if (autonomous) yield* append('text', resultText || rawText)
       else if (!rawText && resultText) yield* append('text', resultText)
       yield* close()
@@ -132,7 +136,10 @@ export class CodeBuddyAdapter extends LlmAdapter {
       yield* close()
       if (usage) yield { type: 'usage', usage }
       const message = error instanceof Error ? error.message : String(error)
-      yield { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: { code: options.signal?.aborted ? 'ABORTED' : 'CODEBUDDY_ERROR', message } } }
+      const failure = error instanceof CodeBuddyLimitError
+        ? { code: error.code, message, ...(error.status !== undefined ? { status: error.status } : {}) }
+        : { code: 'CODEBUDDY_ERROR', message }
+      yield { type: 'finish', reason: { kind: options.signal?.aborted ? 'aborted' : 'error', failure: options.signal?.aborted ? { code: 'ABORTED', message } : failure } }
     }
   }
 }
