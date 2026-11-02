@@ -126,11 +126,11 @@ test('quota failures and partial warnings show the safe reason and model-switch 
     if (partial) {
       assert.equal(finish.reason.kind,'stop')
       const text = out.filter(chunk=>chunk.type==='text-delta').map(chunk=>chunk.text).join('')
-      assert.match(text,/CodeBuddy 部分成功：.*配额已用尽（429）.*切换其他模型/)
+      assert.match(text,/CodeBuddy 部分成功：.*请求配额不足.*HTTP 429.*恢复时间：上游未提供.*切换其他模型/)
       assert.ok(text.endsWith('完整答案'))
     } else {
       assert.ok(finish.reason.kind==='error')
-      assert.deepEqual(finish.reason.failure,{code:'QUOTA',status:429,message:error.message})
+      assert.deepEqual(finish.reason.failure,{code:'CODEBUDDY_QUOTA',status:429,message:error.message})
       assert.equal(out.some(chunk=>chunk.type==='text-delta'),false)
     }
     assert.doesNotMatch(JSON.stringify(out),/SECRET_TOKEN/)

@@ -28,7 +28,7 @@ npm install -g @tencent-ai/codebuddy-code
 需要本机安装 Git。公开仓库使用 HTTPS，不要求 SSH 密钥。将 `web` 替换成实际使用的 DSH profile：
 
 ```sh
-dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.28"
+dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.29"
 ```
 
 仓库**包含已构建的 dist**，安装不依赖 TypeScript、开发依赖或安装时构建脚本。CI 会重新构建并检查提交的产物，避免源码与产物不一致。
@@ -44,10 +44,10 @@ dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-lin
 从 [Releases](https://github.com/liubaicai/dsh-codebuddy-link/releases) 下载对应版本 `.tgz`，可使用同页 `SHA256SUMS.txt` 核对 SHA-256。进入下载目录后执行：
 
 ```powershell
-dsh plugin --profile web add .\dsh-codebuddy-link-0.3.28.tgz
+dsh plugin --profile web add .\dsh-codebuddy-link-0.3.29.tgz
 ```
 
-macOS/Linux 使用 `./dsh-codebuddy-link-0.3.28.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
+macOS/Linux 使用 `./dsh-codebuddy-link-0.3.29.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
 
 ### 4. 启用与升级
 
@@ -162,7 +162,7 @@ ACP provider 通过 **ACP stdio**（`--acp --acp-transport stdio --tools default
 
 启用权限跳过时只传 `--dangerously-skip-permissions`，不同时传冲突的 `--permission-mode dontAsk`。**CodeBuddy 2.177.1 的帮助明确提示 HIGH/CRITICAL 操作仍可能要求确认**；插件不会另外注入 `CODEBUDDY_IS_SANDBOX=1` 来扩大该授权。ACP 若仍发出 `session/request_permission`：已启用权限跳过时，客户端选择 CLI 自己提供的“允许”选项并继续任务；未启用时返回取消并报错，提示开启权限跳过或在交互式 CodeBuddy 会话中执行。客户端不声明文件/终端代理能力，读写与命令由 CLI 原生执行；未知客户端方法返回 method-not-found。非交互调用如被 CLI 安全策略拦截，会报错而不是伪造成功。工作目录不是隔离边界；此模式允许 CLI 以当前系统用户权限访问文件和运行命令，不经过 DSH 文件沙箱或逐项工具确认。取消/超时可以终止进程，但无法撤销已完成的写入或外部操作。仅用于可信任务。
 
-ACP 完成状态区分任务完成与执行质量：`end_turn` 配合 `SUCCESS`（或缺省 outcome）按正常完成处理；`end_turn + PARTIAL_SUCCESS` 且已有非空正文时保留完整答案，并在正文前显示固定的“部分成功，执行过程中出现错误”提示。这不代表所有工具操作或结论均成功，需核对答案；CLI 曾出现的局部工具错误也可能导致该状态。取消、拒绝、模型/工具失败、未知 outcome、缺少答案的部分成功及进程清理失败仍报错，不自动重试或重放。ACP 明确返回配额耗尽或 429 限流时，错误会说明原因，并提示切换其他模型或稍后重试；上游提供可验证的重置时间时一并显示。部分成功的错误字段若明确包含配额/限流原因，正文警告也会显示该原因，不再只给含糊提示；正常成功不会因历史错误被改判失败。不直接展示可能包含凭据或私有地址的原始错误文本。
+ACP 完成状态区分任务完成与执行质量：`end_turn` 配合 `SUCCESS`（或缺省 outcome）按正常完成处理；`end_turn + PARTIAL_SUCCESS` 且已有非空正文时保留完整答案，并在正文前显示固定的“部分成功，执行过程中出现错误”提示。这不代表所有工具操作或结论均成功，需核对答案；CLI 曾出现的局部工具错误也可能导致该状态。取消、拒绝、模型/工具失败、未知 outcome、缺少答案的部分成功及进程清理失败仍报错，不自动重试或重放。ACP 明确返回模型用量限制、账户积分/余额不足或请求限流时，错误会区分原因，显示已知 HTTP 状态与恢复时间，并给出对应建议；上游未说明的原因或恢复时间会明确标注未知，不猜测。使用插件专用错误码保留会话错误中的完整安全提示，避免宿主将 `QUOTA` 替换成固定的通用额度通知；不触发该通用通知或默认自动重试。部分成功的错误字段若明确包含配额/限流原因，正文警告也会显示该原因，不再只给含糊提示；正常成功不会因历史错误被改判失败。不直接展示可能包含凭据或私有地址的原始错误文本。
 
 ### 独立委派与后台请求（受限 print 模式）
 

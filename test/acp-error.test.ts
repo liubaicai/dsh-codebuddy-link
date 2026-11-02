@@ -7,23 +7,40 @@ const quota = (details: string) => ({ code: -32003, message: `Quota exceeded: ${
 
 test('official serialized ACP quota errors retain only classification and validated reset time', () => {
   const error = acpLimitError(JSON.stringify(quota(`429 您的使用量已超出频率限制，将在 ${reset} 重置。 SECRET_TOKEN https://private.invalid`)));
-  assert.equal(error?.code, 'QUOTA');
+  assert.equal(error?.code, 'CODEBUDDY_QUOTA');
   assert.equal(error?.status, 429);
-  assert.match(error!.message, /配额已用尽（429）.*切换其他模型/);
+  assert.match(error!.message, /模型用量已达上限（HTTP 429）.*恢复时间：2026-11-02 21:15:47 UTC\+8.*切换其他模型/);
   assert.ok(error!.message.includes(reset));
   assert.doesNotMatch(error!.message, /SECRET_TOKEN|private\.invalid/);
 });
 
 test('quota and request-rate limits stay distinct, including plain legacy error text', () => {
-  for (const value of [quota('SECRET_TOKEN'), {data:{category:'quota'}}]) assert.equal(acpLimitError(value)?.code, 'QUOTA');
+  for (const value of [quota('SECRET_TOKEN'), {data:{category:'quota'}}]) assert.equal(acpLimitError(value)?.code, 'CODEBUDDY_QUOTA');
   for (const value of ['429 Too Many Requests SECRET_TOKEN', {code:-32003,data:{statusCode:429,category:'rate_limit'}}]) {
     const error = acpLimitError(value);
     assert.equal(error?.code, 'CODEBUDDY_RATE_LIMIT');
     assert.equal(error?.status, 429);
-    assert.match(error!.message, /限流（429）.*切换其他模型.*稍后重试/);
+    assert.match(error!.message, /请求频率受限（HTTP 429）.*恢复时间：上游未提供.*切换其他模型.*稍后重试/);
     assert.doesNotMatch(error!.message, /SECRET_TOKEN/);
   }
   assert.doesNotMatch(acpLimitError({data:{category:'quota'}})!.message, /429/);
+});
+
+test('account credits, model usage and unknown quota causes are not conflated', () => {
+  for (const details of ['账户积分不足', '账户余额已耗尽', 'insufficient credits', 'credit balance is too low']) {
+    const error = acpLimitError({code:-32003,data:{category:'quota',statusCode:402,details}})!;
+    assert.equal(error.code,'CODEBUDDY_CREDITS');
+    assert.equal(error.status,402);
+    assert.match(error.message,/账户积分或余额不足（HTTP 402）.*恢复时间：上游未提供.*检查账户/);
+    assert.doesNotMatch(error.message,/模型用量已达上限|切换其他模型/);
+  }
+  for (const details of ['quota_token_limit', 'token_limit_exceeded', 'usage limit reached']) {
+    assert.match(acpLimitError(quota(details))!.message,/模型用量已达上限/);
+  }
+  const unknown = acpLimitError(quota('SECRET_TOKEN'))!;
+  assert.match(unknown.message,/上游未说明是模型用量限制还是账户余额不足/);
+  assert.match(unknown.message,/恢复时间：上游未提供/);
+  assert.notEqual(unknown.code,'QUOTA', 'DSH replaces QUOTA with generic copy and hides reset details');
 });
 
 test('unlabelled, invalid or timezone-less dates are not advertised as reset times', () => {

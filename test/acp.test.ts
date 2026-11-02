@@ -435,7 +435,7 @@ test('ACP quota and rate-limit errors keep actionable diagnostics across RPC, fa
       assert.equal(last.text,'完整答案');
       if (variant==='partial') {
         assert.equal(last.partialSuccess,true);
-        assert.match(last.partialSuccessMessage!, /配额已用尽（429）.*切换其他模型/);
+        assert.match(last.partialSuccessMessage!, /模型用量已达上限（HTTP 429）.*切换其他模型/);
         assert.doesNotMatch(last.partialSuccessMessage!, /SECRET_TOKEN|private\.invalid/);
       } else {
         assert.equal(last.partialSuccess,undefined);
@@ -446,7 +446,7 @@ test('ACP quota and rate-limit errors keep actionable diagnostics across RPC, fa
       await assert.rejects(async()=>{for await(const event of runCodeBuddyAcp({...f,prompt:'limit'}))events.push(event);},error=>{
         assert.ok(error instanceof CodeBuddyLimitError);
         assert.equal(error.status,429);
-        assert.equal(error.code,variant==='rate'?'CODEBUDDY_RATE_LIMIT':'QUOTA');
+        assert.equal(error.code,variant==='rate'?'CODEBUDDY_RATE_LIMIT':'CODEBUDDY_QUOTA');
         assert.match(error.message,/切换其他模型/);
         if(variant!=='rate')assert.match(error.message,/2026-11-02 21:15:47 UTC\+8/);
         assert.doesNotMatch(error.message,/SECRET_TOKEN|private\.invalid/);

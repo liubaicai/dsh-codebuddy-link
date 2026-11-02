@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.29
+
+- Keep actionable quota diagnostics visible in DSH by using provider-specific non-retryable codes instead of the host's generic QUOTA notice. Preserve HTTP status and verified recovery time in the displayed message.
+- Distinguish model usage limits from explicit account credit/balance exhaustion. State when the upstream leaves the cause or recovery time unspecified instead of guessing.
+
 ## 0.3.28
 
 - Preserve actionable ACP quota/429 diagnostics from structured RPC errors and CodeBuddy outcome metadata. Show model-switch/retry advice and validated reset timestamps without exposing upstream secrets; retain safe failure codes/status in DSH.
