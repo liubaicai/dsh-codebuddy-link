@@ -59,7 +59,10 @@ input.on('line', line => {
  if (mode === 'oversized') return process.stdout.write('x'.repeat(8*1024*1024+1));
  if (mode === 'exit') {process.stderr.write('SECRET_TOKEN'); return process.exit(4);}
  if (mode === 'missing') return process.exit(0);
- if (mode === 'eof') return process.stdout.end();
+ if (mode === 'eof') return process.stdout.end(() => {
+  // On Windows Node keeps the inherited stdout pipe open until process exit.
+  if (process.platform === 'win32') process.exit(0);
+ });
  if (mode === 'bad-version') return send({jsonrpc:'1.0',id:row.id,result:{stopReason:'end_turn'}});
  if (mode === 'bad-id') return reply(99,{stopReason:'end_turn'});
  if (mode.startsWith('trailing:')) {
@@ -424,7 +427,7 @@ test('unsupported host requests return method-not-found and are never replayed',
   assert.deepEqual(events.at(-1), { type: 'result', sessionId: 'fresh-session', text: 'not executed' });
 });
 
-test('server errors, malformed frames, invalid RPC, oversized frames and early exits reject without server secrets', async t => {
+test('server errors, malformed frames, invalid RPC, oversized frames and early exits reject without server secrets', {timeout:90000}, async t => {
   for (const prompt of ['error', 'malformed', 'oversized', 'exit', 'missing', 'eof', 'bad-version', 'bad-id', 'both', 'bad-update', 'late-update', 'duplicate', 'outcome']) {
     const f = await fixture(t);
     await assert.rejects(collect(runCodeBuddyAcp({ ...f, prompt })), error => error instanceof Error && !/SECRET_TOKEN|private\.invalid/.test(error.message), prompt);

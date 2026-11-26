@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.33
+
+- Fix the Windows ACP disconnection test so it exercises an actual pipe closure. Includes the configurable inactivity reminder introduced in 0.3.32.
+
 ## 0.3.32
 
 - Keep an active ACP task running through periods of silence. CodeBuddy settings now let users set the inactivity warning in minutes, with a 10-minute default. The warning appears in run history and updates for active tasks when saved.
