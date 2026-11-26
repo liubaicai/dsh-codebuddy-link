@@ -21,6 +21,8 @@ export interface CodeBuddyRequest {
   effort?: string;
   /** Internal lifecycle notification; never passed to the CLI. */
   onSpawn?: () => void;
+  /** Validated ACP task activity, including updates that are not streamed to DSH. */
+  onProgress?: () => void;
   permissionMode?: 'dontAsk' | 'plan' | 'acceptEdits';
   tools?: string;
   bin?: string;

@@ -139,7 +139,9 @@ try {
   ]);
   const rows = (await readFile(join(cwd, 'wire.ndjson'), 'utf8')).trim().split('\n').map(line => JSON.parse(line));
   assert.deepEqual(rows, [
-    { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } },
+    { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+      protocolVersion: 1, clientCapabilities: { _meta: { 'codebuddy.ai': { terminalOutputChunk: true } } },
+    } },
     { jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd, mcpServers: [] } },
     { jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'fresh-session', prompt: [{ type: 'text', text: prompt }] } },
     { jsonrpc: '2.0', id: 'unsupported-host-request', error: { code: -32601, message: 'Method not found' } },

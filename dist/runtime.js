@@ -101,15 +101,17 @@ export class CallRuntime {
                 throw error('AbortError', 'CodeBuddy request aborted');
             record.state = 'starting';
             record.startedAt = Date.now();
+            const markProgress = () => { record.state = 'responding'; record.lastProgressAt = Date.now(); };
             for await (const event of runner({ ...request, authToken, onSpawn: () => {
                     record.state = 'waiting';
                     request.onSpawn?.();
+                }, onProgress: () => {
+                    markProgress();
+                    request.onProgress?.();
                 } })) {
                 if ((event.type === 'text' || event.type === 'reasoning') && event.delta.length > 0
-                    || event.type === 'tool-start' || event.type === 'tool-end' || event.type === 'model-switch') {
-                    record.state = 'responding';
-                    record.lastProgressAt = Date.now();
-                }
+                    || event.type === 'tool-start' || event.type === 'tool-end' || event.type === 'model-switch')
+                    markProgress();
                 if (event.type === 'metadata') {
                     if (identifier(event.model))
                         record.returnedModel = event.model;

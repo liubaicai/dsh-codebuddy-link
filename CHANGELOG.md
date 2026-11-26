@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.31
+
+- Count native CodeBuddy terminal output as ACP progress so long-running commands can continue while producing output. The inactivity timeout and the run status use the same progress signal.
+
 ## 0.3.30
 
 - Add ordered, opt-in candidate models beside the default-model setting, with numbered multi-selection and hover help. Empty selection preserves fail-fast behavior.

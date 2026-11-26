@@ -100,8 +100,10 @@ export async function* runCodeBuddyAcp(request) {
     let cleanupFailure;
     const notify = () => { const resolve = wake; wake = undefined; resolve?.(); };
     const progress = () => {
-        if (!stopping && !failure && !promptResponded)
-            timer.refresh();
+        if (stopping || failure || promptResponded)
+            return;
+        timer.refresh();
+        request.onProgress?.();
     };
     const rejectPending = (error) => {
         for (const entry of pending.values())
@@ -210,6 +212,19 @@ export async function* runCodeBuddyAcp(request) {
         }
         if (params.sessionId !== sessionId)
             throw protocolError();
+        // Native terminal output can arrive during prompt cleanup. It is only an
+        // activity signal, so never forward its bytes or reopen a completed prompt.
+        if (row.sessionUpdate === 'terminal_output_chunk') {
+            const { terminalId, data } = row;
+            if (typeof terminalId !== 'string' || !terminalId || terminalId.length > 512 || typeof data !== 'string')
+                throw protocolError();
+            if (!data)
+                return;
+            if (data.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(data))
+                throw protocolError();
+            progress();
+            return;
+        }
         if (promptResponded && !isSessionMetadata(row))
             throw protocolError();
         for (const event of usage.accept(row))
@@ -353,8 +368,8 @@ export async function* runCodeBuddyAcp(request) {
                 promptResponded = true;
                 clearTimeout(timer);
             }
-            else
-                progress();
+            else if (!promptResponded)
+                timer.refresh();
             pending.delete(value.id);
             entry.resolve(value.result);
         }
@@ -406,8 +421,8 @@ export async function* runCodeBuddyAcp(request) {
         }
     };
     const onAbort = () => fail(abortError());
-    // Only validated text/thought/tool progress and matched setup replies renew
-    // this watchdog: stderr, partial frames and unrelated metadata cannot keep a
+    // Only validated task progress and matched setup replies renew this watchdog:
+    // stderr, partial frames and unrelated metadata cannot keep a
     // stalled task alive. Explicit cancellation and bounded cleanup stay unchanged.
     const onTimeout = () => fail(Object.assign(new Error(`CodeBuddy ACP request timed out after ${timeoutMs}ms without progress`), { name: 'TimeoutError' }));
     let timer = setTimeout(onTimeout, timeoutMs);
@@ -427,7 +442,11 @@ export async function* runCodeBuddyAcp(request) {
         onAbort();
     const driver = (async () => {
         try {
-            const init = await rpc('initialize', { protocolVersion: 1, clientCapabilities: {} });
+            const init = await rpc('initialize', {
+                protocolVersion: 1,
+                // Subscribe to CLI-owned output without claiming client-side terminal execution.
+                clientCapabilities: { _meta: { 'codebuddy.ai': { terminalOutputChunk: true } } },
+            });
             if (!object(init) || init.protocolVersion !== 1 || !object(init.agentCapabilities))
                 throw protocolError();
             if (failure)
@@ -512,7 +531,7 @@ export async function* runCodeBuddyAcp(request) {
                     // This is a new user turn in that same session, not an exact token resume.
                     prompt = '上一次请求因 HTTP 429 中断，已切换模型。请根据当前会话历史继续尚未完成的原任务，不要重复已经完成的工具操作；如果任务已经完成，直接总结结果。';
                     promptResponded = false;
-                    progress();
+                    timer.refresh();
                 }
             }
         }

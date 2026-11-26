@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { setTimeout as delay } from 'node:timers/promises'
 import { resolveConfig } from '../src/config.ts'
 import { resolveEffort } from '../src/effort.ts'
 import { CallRuntime } from '../src/runtime.ts'
@@ -70,19 +69,23 @@ test('queued abort and timeout never start a process and do not leak slots', asy
   await collect(runtime.run(request, 'ask', runner)); assert.equal(spawned, 2)
 })
 
-test('silence warning ignores init metadata and clears on meaningful progress', async () => {
-  const cfg = resolveConfig({ stallWarnMs: 1 }, {}), runtime = new CallRuntime(cfg)
+test('silence warning ignores init metadata and clears on unstreamed and streamed progress', async t => {
+  t.mock.timers.enable({ apis: ['Date'] })
+  const runtime = new CallRuntime(resolveConfig({ stallWarnMs: 1000 }, {}))
   const iterator = runtime.run(request, 'model', async function* (req) {
     req.onSpawn?.(); yield { type: 'metadata', model: 'hy3' }
+    req.onProgress?.(); yield { type: 'metadata', model: 'hy3' }
     yield { type: 'text', delta: 'content' }
-    yield { type: 'result', text: '' }
   })
-  await iterator.next(); await delay(10)
+  await iterator.next(); t.mock.timers.tick(1000)
   assert.equal(runtime.snapshots()[0]!.state, 'waiting')
   assert.equal(runtime.snapshots()[0]!.warning, true)
-  cfg.stallWarnMs = 60000
   await iterator.next()
   assert.equal(runtime.snapshots()[0]!.state, 'responding')
+  assert.equal(runtime.snapshots()[0]!.warning, false)
+  t.mock.timers.tick(1000)
+  assert.equal(runtime.snapshots()[0]!.warning, true)
+  await iterator.next()
   assert.equal(runtime.snapshots()[0]!.warning, false)
   await iterator.return(undefined)
   assert.equal(runtime.snapshots()[0]!.state, 'cancelled')

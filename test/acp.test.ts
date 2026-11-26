@@ -23,11 +23,13 @@ const update = row => send({jsonrpc:'2.0',method:'session/update',params:{sessio
 const text = value => update({sessionUpdate:'agent_message_chunk',content:{type:'text',text:value}});
 const input = createInterface({input:process.stdin});
 let mode;
+let terminalOutputChunk = false;
 input.on('line', line => {
  const row = JSON.parse(line);
  appendFileSync('wire.ndjson', line + '\n');
  const setup = existsSync('setup.json') ? JSON.parse(readFileSync('setup.json','utf8')) : null;
  if (row.method === 'initialize') {
+  terminalOutputChunk = row.params.clientCapabilities?._meta?.['codebuddy.ai']?.terminalOutputChunk === true;
   if(setup?.early)for(const params of setup.notifications)send({jsonrpc:'2.0',method:'session/update',params});
   return reply(row.id,{protocolVersion:1,agentCapabilities:{loadSession:true}});
  }
@@ -67,6 +69,7 @@ input.on('line', line => {
    {sessionUpdate:'current_mode_update',currentModeId:'default'},
    {sessionUpdate:'config_option_update',configOptions:[{id:'model',name:'Model',type:'select',currentValue:'x',options:[{value:'x',name:'X'}]}]},
    {sessionUpdate:'available_commands_update',availableCommands:[{name:'help',description:'Help',input:{hint:'topic'}}]},
+   {sessionUpdate:'terminal_output_chunk',terminalId:'term_1',data:'Zm9v'},
    {sessionUpdate:'usage_update',used:900,size:1000,_meta:{'codebuddy.ai/messageId':'billed',usage:{prompt_tokens:10,completion_tokens:5,prompt_cache_hit_tokens:2,prompt_cache_write_tokens:0},'codebuddy.ai/requestCredits':{r:0.25}}},
   ];
   const invalid = {
@@ -154,13 +157,20 @@ input.on('line', line => {
    count++;
    if(kind==='tool')update({sessionUpdate:'tool_call_update',toolCallId:'long-tool',status:'in_progress',rawOutput:'working '+count});
    else if(kind==='thought')update({sessionUpdate:'agent_thought_chunk',content:{type:'text',text:'thinking'}});
-   else text('working');
+   else if(kind==='terminal') {
+    if(terminalOutputChunk)update({sessionUpdate:'terminal_output_chunk',terminalId:'term_1',data:Buffer.from('private terminal output').toString('base64')});
+   } else text('working');
    if(count===12){clearInterval(tick);if(kind!=='stall')reply(row.id,{stopReason:'end_turn'});}
   },200);
   return;
  }
  if(mode==='noise') {
-  setInterval(()=>{process.stderr.write('private diagnostic');text('');update({sessionUpdate:'session_info_update',title:'unchanged'});send({jsonrpc:'2.0',method:'unknown_notification'});},100);
+  setInterval(()=>{
+   process.stderr.write('private diagnostic');text('');
+   update({sessionUpdate:'session_info_update',title:'unchanged'});
+   update({sessionUpdate:'terminal_output_chunk',terminalId:'term_1',data:''});
+   send({jsonrpc:'2.0',method:'unknown_notification'});
+  },100);
   return;
  }
  if(mode === 'idle')return;
@@ -210,7 +220,9 @@ test('ACP v1 initializes with no host capabilities, creates fresh session, sends
   const events = await collect(runCodeBuddyAcp({ ...f, prompt: 'complete history\nuser and assistant', onSpawn: () => { spawned++; } }));
   assert.equal(spawned, 1);
   const rows = await wire(f.cwd);
-  assert.deepEqual(rows[0], { jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: 1, clientCapabilities: {} } });
+  assert.deepEqual(rows[0], { jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+    protocolVersion: 1, clientCapabilities: { _meta: { 'codebuddy.ai': { terminalOutputChunk: true } } },
+  } });
   assert.deepEqual(rows[1], { jsonrpc: '2.0', id: 2, method: 'session/new', params: { cwd: f.cwd, mcpServers: [] } });
   assert.deepEqual(rows[2], { jsonrpc: '2.0', id: 3, method: 'session/prompt', params: { sessionId: 'fresh-session', prompt: [{ type: 'text', text: 'complete history\nuser and assistant' }] } });
   assert.deepEqual(events, [
@@ -519,12 +531,16 @@ test('active cancellation sends session/cancel, kills process tree and removes s
   await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));
 });
 
-test('ACP progress renews the idle budget for text, thoughts and in-progress tools', {timeout:30000}, async t => {
-  for (const kind of ['text','thought','tool']) {
+test('ACP progress renews the idle budget for text, thoughts, tools and native terminal output', {timeout:30000}, async t => {
+  for (const kind of ['terminal','text','thought','tool']) {
     const f = await fixture(t);
     const start = Date.now();
-    const events = await collect(runCodeBuddyAcp({...f,prompt:`progress:${kind}`,timeoutMs:1500}));
+    let progressEvents = 0;
+    const events = await collect(runCodeBuddyAcp({...f,prompt:`progress:${kind}`,timeoutMs:1500,onProgress:()=>{ progressEvents++; }}));
     assert.ok(Date.now()-start > 1500, 'task must outlive the old total deadline');
+    if (kind==='terminal') assert.deepEqual({ progressEvents, events }, {
+      progressEvents: 12, events: [{type:'result',sessionId:'fresh-session',text:''}],
+    });
     const result = events.at(-1);
     assert.equal(result?.type, 'result');
     if (kind==='text') assert.equal(result?.type==='result' && result.text, 'working'.repeat(12));
@@ -547,7 +563,7 @@ test('ACP times out after progress stops, not from the original start time', {ti
   await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
 });
 
-test('stderr, empty text and unrelated metadata do not renew the ACP idle budget', {timeout:15000}, async t => {
+test('stderr, empty chunks and unrelated metadata do not renew the ACP idle budget', {timeout:15000}, async t => {
   const f = await fixture(t);
   await assert.rejects(collect(runCodeBuddyAcp({...f,prompt:'noise',timeoutMs:1500})), {name:'TimeoutError'});
   await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
