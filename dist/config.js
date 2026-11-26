@@ -90,7 +90,7 @@ export function resolveConfig(entry = {}, env = process.env) {
         reasoningEffort,
         maxConcurrency: boundedInteger('maxConcurrency', 'DSH_CODEBUDDY_MAX_CONCURRENCY', 2, 1, 16),
         queueTimeoutMs: boundedInteger('queueTimeoutMs', 'DSH_CODEBUDDY_QUEUE_TIMEOUT_MS', 600000, 1, 2147483647),
-        stallWarnMs: boundedInteger('stallWarnMs', 'DSH_CODEBUDDY_STALL_WARN_MS', 90000, 0, 2147483647),
+        stallWarnMs: boundedInteger('stallWarnMs', 'DSH_CODEBUDDY_STALL_WARN_MS', 600000, 0, 2147483647),
         contextWindow: number('contextWindow', 'DSH_CODEBUDDY_CONTEXT_WINDOW', 128000),
         modelContext,
         maxPromptChars: number('maxPromptChars', 'DSH_CODEBUDDY_MAX_PROMPT_CHARS', 1000000),

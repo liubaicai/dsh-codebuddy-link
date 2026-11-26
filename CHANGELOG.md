@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.32
+
+- Keep an active ACP task running through periods of silence. CodeBuddy settings now let users set the inactivity warning in minutes, with a 10-minute default. The warning appears in run history and updates for active tasks when saved.
+
 ## 0.3.31
 
 - Count native CodeBuddy terminal output as ACP progress so long-running commands can continue while producing output. The inactivity timeout and the run status use the same progress signal.

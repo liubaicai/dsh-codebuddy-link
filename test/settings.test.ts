@@ -12,7 +12,7 @@ import { CodeBuddyAdapter } from '../src/adapter.ts'
 test('runtime settings validate defaults, environment, efforts and numeric boundaries', () => {
   const defaults = resolveConfig({}, {})
   assert.equal(defaults.reasoningEffort, 'auto'); assert.equal(defaults.maxConcurrency, 2)
-  assert.equal(defaults.queueTimeoutMs, 600000); assert.equal(defaults.stallWarnMs, 90000)
+  assert.equal(defaults.queueTimeoutMs, 600000); assert.equal(defaults.stallWarnMs, 600000)
   const env = {DSH_CODEBUDDY_REASONING_EFFORT:'ultracode', DSH_CODEBUDDY_MAX_CONCURRENCY:'16', DSH_CODEBUDDY_QUEUE_TIMEOUT_MS:'2147483647', DSH_CODEBUDDY_STALL_WARN_MS:'0'}
   const configured = resolveConfig({}, env)
   assert.equal(configured.reasoningEffort, 'ultracode'); assert.equal(configured.maxConcurrency, 16)
@@ -53,6 +53,7 @@ test('panel updates preserve legacy administrator settings while internal metada
     const store = new SettingsStore({}, path)
     const before = readFileSync(path, 'utf8')
     for (const [key, value] of Object.entries(legacy)) {
+      if (key === 'stallWarnMs') continue
       assert.throws(() => store.updateFromPanel({permissionMode:'plan', [key]:value}), /administrator-only/)
       assert.equal(store.config.permissionMode, 'dontAsk')
       assert.equal(readFileSync(path, 'utf8'), before)
@@ -295,21 +296,22 @@ test('HTTP settings enforce method, same origin, JSON and publish refresh status
     assert.equal(initial.config.executionMode,undefined); assert.equal(initial.config.dangerouslySkipPermissions,false)
     assert.deepEqual(initial.config.fallbackModels, [])
     assert.equal(initial.config.reasoningEffort,'auto'); assert.equal(initial.config.maxConcurrency,2)
-    assert.equal(initial.config.queueTimeoutMs,600000); assert.equal(initial.config.stallWarnMs,90000)
+    assert.equal(initial.config.queueTimeoutMs,600000); assert.equal(initial.config.stallWarnMs,600000)
     assert.equal(initial.runs.length,5); assert.equal(initial.runs[0]!.totalCredits,0); assert.equal(initial.runs[0]!.totalCostUsd,0)
     assert.equal(initial.runs[0]!.returnedModel,undefined)
     assert.doesNotMatch(JSON.stringify(initial), /private prompt|private output|private error|private path/)
     assert.equal((await fetch(base+'/config')).status,405)
     assert.equal((await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json',origin:'https://evil.example'},body:'{}'})).status,403)
     assert.equal((await fetch(base+'/config',{method:'POST',body:'{}'})).status,415)
-    const saved = await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({models:['hy3'],fallbackModels:['hy3'],permissionMode:'plan',reasoningEffort:'high',executionMode:'bridge',dangerouslySkipPermissions:true})})
+    const saved = await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({models:['hy3'],fallbackModels:['hy3'],permissionMode:'plan',reasoningEffort:'high',executionMode:'bridge',dangerouslySkipPermissions:true,stallWarnMs:900000})})
     assert.equal(saved.status,200); assert.equal(changed,1)
     const settings = await saved.json() as {config:Record<string,unknown>}
     assert.equal(settings.config.executionMode,undefined); assert.equal(settings.config.dangerouslySkipPermissions,true)
     assert.deepEqual(settings.config.fallbackModels, ['hy3'])
     assert.equal(settings.config.reasoningEffort,'high'); assert.equal(settings.config.maxConcurrency,2)
-    assert.equal(settings.config.queueTimeoutMs,600000); assert.equal(settings.config.stallWarnMs,90000)
-    for (const patch of [{tools:'default'}, {maxConcurrency:3}, {queueTimeoutMs:6000}, {stallWarnMs:0}, {modelContext:{hy3:1}}]) {
+    assert.equal(settings.config.queueTimeoutMs,600000); assert.equal(settings.config.stallWarnMs,900000)
+    assert.equal(new SettingsStore({},join(dir,'settings.json')).config.stallWarnMs,900000)
+    for (const patch of [{tools:'default'}, {maxConcurrency:3}, {queueTimeoutMs:6000}, {timeoutMs:0}, {stallWarnMs:-1}, {stallWarnMs:null}, {modelContext:{hy3:1}}]) {
       const rejected = await fetch(base+'/config',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({permissionMode:'acceptEdits', ...patch})})
       assert.equal(rejected.status,400)
     }

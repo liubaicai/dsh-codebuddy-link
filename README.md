@@ -28,7 +28,7 @@ npm install -g @tencent-ai/codebuddy-code
 需要本机安装 Git。公开仓库使用 HTTPS，不要求 SSH 密钥。将 `web` 替换成实际使用的 DSH profile：
 
 ```sh
-dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.31"
+dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.32"
 ```
 
 仓库**包含已构建的 dist**，安装不依赖 TypeScript、开发依赖或安装时构建脚本。CI 会重新构建并检查提交的产物，避免源码与产物不一致。
@@ -44,10 +44,10 @@ dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-lin
 从 [Releases](https://github.com/liubaicai/dsh-codebuddy-link/releases) 下载对应版本 `.tgz`，可使用同页 `SHA256SUMS.txt` 核对 SHA-256。进入下载目录后执行：
 
 ```powershell
-dsh plugin --profile web add .\dsh-codebuddy-link-0.3.31.tgz
+dsh plugin --profile web add .\dsh-codebuddy-link-0.3.32.tgz
 ```
 
-macOS/Linux 使用 `./dsh-codebuddy-link-0.3.31.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
+macOS/Linux 使用 `./dsh-codebuddy-link-0.3.32.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
 
 ### 4. 启用与升级
 
@@ -96,7 +96,7 @@ GitHub 安装或 Actions 不会读取你的 CodeBuddy 凭据；模型请求只�
 
 ## 配置
 
-Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 > 插件 config > 环境变量 > 默认值**。面板只调整模型、权限模式、权限跳过和思考强度，账户管理另行持久化。委派 tools、并发、排队超时、提醒阈值和 CLI 路径等由管理员配置或默认值控制。
+Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 > 插件 config > 环境变量 > 默认值**。面板可调整模型、权限模式、权限跳过、思考强度和无进展提醒时长。账户管理另行持久化。委派 tools、并发、排队超时和 CLI 路径等由管理员配置或默认值控制。
 
 | config | 环境变量 | 默认值 / 说明 |
 | --- | --- | --- |
@@ -108,11 +108,11 @@ Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 
 | `hiddenModels` | `DSH_CODEBUDDY_HIDDEN_MODELS` | 隐藏并禁止调用的模型 ID 数组 / 逗号分隔列表 |
 | `workspaceRoot` | `DSH_CODEBUDDY_WORKSPACE_ROOT` | 当前 DSH session 工作目录；ACP 原生执行必需，缺失时拒绝启动 |
 | `dangerouslySkipPermissions` | `DSH_CODEBUDDY_DANGEROUSLY_SKIP_PERMISSIONS` | `false`；仅 provider ACP 主调用生效，传入 `--dangerously-skip-permissions`，不影响 `codebuddy_ask` |
-| `timeoutMs` | `DSH_CODEBUDDY_TIMEOUT_MS` | `600000`；ACP 主调用的无进展超时。正文、思考、工具更新和 CLI 原生终端的增量输出都会重置计时。完全无输出的阶段仍受此限制。独立委派和后台 print 调用使用总执行预算，均不含排队时间 |
+| `timeoutMs` | `DSH_CODEBUDDY_TIMEOUT_MS` | `600000`，毫秒。用于 ACP 初始化、创建会话和切换模型的单次协议请求，以及独立委派和后台 print 调用的总执行预算。排队时间单独计算 |
 | `reasoningEffort` | `DSH_CODEBUDDY_REASONING_EFFORT` | `auto`；主模型与独立委派共享默认值，允许 `auto/minimal/low/medium/high/xhigh/max/ultracode` |
 | `maxConcurrency` | `DSH_CODEBUDDY_MAX_CONCURRENCY` | `2`；整数 1–16，当前插件实例内共享并发槽位 |
 | `queueTimeoutMs` | `DSH_CODEBUDDY_QUEUE_TIMEOUT_MS` | `600000`；整数 1–2147483647，排队预算 |
-| `stallWarnMs` | `DSH_CODEBUDDY_STALL_WARN_MS` | `90000`；整数 0–2147483647，0 关闭无进展提醒 |
+| `stallWarnMs` | `DSH_CODEBUDDY_STALL_WARN_MS` | `600000`（10 分钟）。对应设置页「无进展超时（分钟）」，达到阈值时在运行记录中提醒。整数 0–2147483647 毫秒，0 关闭提醒 |
 | `contextWindow` | `DSH_CODEBUDDY_CONTEXT_WINDOW` | `128000`，未发现窗口信息模型的回退值 |
 | `modelContext` | `DSH_CODEBUDDY_MODEL_CONTEXT` | 每个模型的上下文窗口（模型发现时从 models.dev 获取并保存），如 `{"hy3": 262144}` |
 | `maxPromptChars` | `DSH_CODEBUDDY_MAX_PROMPT_CHARS` | `1000000`；超限报错，不静默截断 |
@@ -144,7 +144,7 @@ Cordis 插件名为 `dsh-codebuddy-link`。优先级为 **面板已保存设置 
 
 主模型、后台请求和独立委派共享账户调度及全局队列。托管账户先取得每账户槽位（固定 1），再进入全局 FIFO 队列；账户队列和全局队列各最多 64 个等待请求，各自使用排队预算。不同账户可并行，等待同一账户不会阻塞其他账户；队列满、排队超时、执行超时和取消不会自动重试或切换模型。排队取消不启动 CLI，执行取消/超时回收进程树后才释放槽位。队列只在当前插件实例生效，不提供跨 DSH 进程/多实例的全局限流。调高并发数立即唤醒队列，调低不杀死已有进程；思考强度和排队预算修改只影响新调用，已进入某一队列的请求保留该阶段预算。独立委派的宿主总时限为执行预算 + 2 × 排队预算 + 5 秒，最多 2147483647 毫秒；宿主自身更短的截止时间仍可能提前取消。
 
-状态包括排队、启动、等待响应、响应中、完成、失败、取消。无进展时间由正文/思考/工具事件和已确认的候选模型切换更新，初始化元数据不算进展；提醒只是“仍在等待”，不是失败，不触发重试。提醒阈值对现有记录立即生效。进入面板时自动查询一次账户，账户可用后自动获取模型列表；手动刷新账户同样按此顺序执行。面板挂载期间每 2 秒只读取本机状态，不轮询账户积分、模型列表或 OAuth，不覆盖未保存设置。
+状态包括排队、启动、等待响应、响应中、完成、失败、取消。正文、思考、工具更新、原生终端增量输出和已确认的候选模型切换都会更新进展时间。达到设置值后，运行记录显示「长时间无进展，仍在等待」。ACP 任务继续运行，直到 CLI 返回结果、用户取消或发生明确错误。修改提醒阈值对运行中的任务立即生效。进入面板时自动查询一次账户，账户可用后自动获取模型列表；手动刷新账户同样按此顺序执行。面板挂载期间每 2 秒只读取本机状态，不轮询账户积分、模型列表或 OAuth，不覆盖未保存设置。
 
 设置页运行记录仅存在进程内存，按调用入队顺序只保留最近 5 条记录（不限状态），重启清空；面板在“保存设置”下方显示，新调用在前。旧记录移出历史不会取消调用或改变队列调度。仅保留白名单元数据，不记录提示词、回复、工作目录、原始 CLI 事件、凭据或原始错误文本。模型标识限制长度/字符并拒绝 URL、绝对路径及遍历片段；这不是能识别伪装成合法模型 ID 的任意秘密的检测器。原有 `/codebuddy status` 仍展示管理员配置（含 CLI/工作目录），分享时请自行检查。
 
@@ -166,7 +166,7 @@ ACP provider 通过 **ACP stdio**（`--acp --acp-transport stdio --tools default
 
 ACP 完成状态区分任务完成与执行质量：`end_turn` 配合 `SUCCESS`（或缺省 outcome）按正常完成处理；`end_turn + PARTIAL_SUCCESS` 且已有非空正文时保留完整答案，并在正文前显示固定的“部分成功，执行过程中出现错误”提示。这不代表所有工具操作或结论均成功，需核对答案；CLI 曾出现的局部工具错误也可能导致该状态。取消、拒绝、模型/工具失败、未知 outcome、缺少答案的部分成功及进程清理失败仍结束任务；仅明确 HTTP 429 导致未完成且已配置候选模型时，使用下述同会话续接。ACP 明确返回模型用量限制、账户积分/余额不足或请求限流时，错误会区分原因，显示已知 HTTP 状态与恢复时间，并给出对应建议；上游未说明的原因或恢复时间会明确标注未知，不猜测。使用插件专用错误码保留会话错误中的完整安全提示，避免宿主将 `QUOTA` 替换成固定的通用额度通知；不触发该通用通知或默认自动重试。部分成功的错误字段若明确包含配额/限流原因，正文警告也会显示该原因，不再只给含糊提示；正常成功不会因历史错误被改判失败。不直接展示可能包含凭据或私有地址的原始错误文本。
 
-候选模型续接仅在原 CLI 进程和 ACP 会话仍可用时执行 `session/set_model`，收到目标模型确认后，在该会话发送一条继续未完成任务的指令。已提交的原生工具历史保持在 CLI 内，插件不重传原始任务、不重新启动进程、不重放工具；最终正文使用续接后的回答，切换前的草稿只保留在进度区，计费用量按消息 ID 累加。它不是逐 token 的断点恢复，也不能保证未完成工具操作恰好执行一次。CLI 不支持或未确认切换时直接停止。切换和后续执行继续受无进展超时与用户取消约束；认证失败、非 429 错误、已完成回答中的历史 429 不触发候选。每次调用开始时固定候选顺序，执行中修改设置只影响后续调用。
+候选模型续接仅在原 CLI 进程和 ACP 会话仍可用时执行 `session/set_model`，收到目标模型确认后，在该会话发送一条继续未完成任务的指令。已提交的原生工具历史保持在 CLI 内，插件不重传原始任务、不重新启动进程、不重放工具；最终正文使用续接后的回答，切换前的草稿只保留在进度区，计费用量按消息 ID 累加。它不是逐 token 的断点恢复，也不能保证未完成工具操作恰好执行一次。CLI 不支持或未确认切换时直接停止。模型切换请求有独立的响应期限。续接后的 ACP 任务与首次执行采用相同的等待和取消行为。认证失败、非 429 错误、已完成回答中的历史 429 不触发候选。每次调用开始时固定候选顺序，执行中修改设置只影响后续调用。
 
 ### 独立委派与后台请求（受限 print 模式）
 

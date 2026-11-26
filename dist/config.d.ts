@@ -15,7 +15,7 @@ export interface PluginConfig {
     /** Fixed: provider calls always run through ACP autonomous execution. */
     executionMode: 'autonomous';
     dangerouslySkipPermissions: boolean;
-    /** ACP inactivity budget; print-mode delegation/background total budget. */
+    /** ACP setup/model-switch RPC budget and print-mode total execution budget. */
     timeoutMs: number;
     reasoningEffort: string;
     maxConcurrency: number;

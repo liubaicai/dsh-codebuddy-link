@@ -20,7 +20,7 @@ export interface CodeBuddyRequest {
     permissionMode?: 'dontAsk' | 'plan' | 'acceptEdits';
     tools?: string;
     bin?: string;
-    /** ACP: inactivity budget; print mode: total execution budget. Excludes queues. */
+    /** ACP setup/model-switch RPC budget and print-mode total execution budget. Excludes queues. */
     timeoutMs?: number;
     signal?: AbortSignal;
     jsonSchema?: Record<string, unknown>;

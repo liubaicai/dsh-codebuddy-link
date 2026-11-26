@@ -277,6 +277,24 @@ test('removed runtime settings and tools survive save by being omitted, not rese
   assert.equal(app.state[1].tools, 'CustomTool'); assert.equal(app.state[1].maxConcurrency, 7);
 });
 
+test('inactivity threshold defaults to ten minutes and saves an edited duration in milliseconds', async () => {
+  const response = {...payload(), config:{...payload().config, stallWarnMs:915000}};
+  const app = mounted([{value:payload()}, {value:response}]); app.render(); await settle();
+  const input = () => control(app.render(), '无进展超时（分钟）', 'input');
+  assert.equal(input().props.value, '10');
+  assert.match(content(app.render()), /在运行记录中提醒，ACP 任务继续运行/);
+  for (const value of ['', '-1', '999999']) {
+    input().props.onChange({target:{value}});
+    assert.equal(input().props['aria-invalid'], true);
+    assert.equal(button(app.render(), '保存设置').props.disabled, true);
+  }
+  input().props.onChange({target:{value:'15.25'}});
+  button(app.render(), '保存设置').props.onClick(); await settle();
+  assert.equal(JSON.parse(app.calls.at(-1)!.init.body).stallWarnMs, 915000);
+  assert.equal(input().props.value, '15.25');
+  assert.match(content(app.render()), /设置已保存/);
+});
+
 test('hiding all models prevents save until an enabled default is chosen', async () => {
   const app = mounted(); app.render(); await settle();
   assert.equal(modelChip(app.render(), 'hidden').props['aria-pressed'], false);

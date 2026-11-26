@@ -38,8 +38,8 @@ const MAX_BUFFER_BYTES = 32 * 1024 * 1024;
 export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerator<BridgeEvent> {
   if (request.signal?.aborted) throw abortError();
   if (typeof request.prompt !== 'string' || typeof request.cwd !== 'string' || !request.cwd) throw new TypeError('prompt and cwd are required');
-  // ACP tasks may run indefinitely while making progress. This is an idle
-  // budget, not a wall-clock deadline; print-mode delegation keeps its own budget.
+  // The transport bounds setup and model-switch RPCs. A running prompt waits
+  // for a response, cancellation, or a connection/protocol failure.
   const timeoutMs = request.timeoutMs ?? DEFAULT_TIMEOUT;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new RangeError('timeoutMs must be a positive finite timer duration');
   if (request.permissionMode && !['dontAsk', 'plan', 'acceptEdits'].includes(request.permissionMode)) throw new TypeError('Unsupported permissionMode');
@@ -85,10 +85,9 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
   let termination: Promise<void> | undefined;
   let cleanupFailure: Error | undefined;
   const notify = (): void => { const resolve = wake; wake = undefined; resolve?.(); };
+  let rpcTimer: ReturnType<typeof setTimeout> | undefined;
   const progress = (): void => {
-    if (stopping || failure || promptResponded) return;
-    timer.refresh();
-    request.onProgress?.();
+    if (!stopping && !failure && !promptResponded) request.onProgress?.();
   };
   const rejectPending = (error: Error): void => {
     for (const entry of pending.values()) entry.reject(error);
@@ -103,7 +102,7 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
   };
   const terminate = (cancel: boolean): Promise<void> => termination ??= (async () => {
     stopping = true;
-    clearTimeout(timer);
+    clearTimeout(rpcTimer);
     let cleanup: (() => Promise<void>) | undefined;
     // Snapshot identities BEFORE the agent can exit in response to cancel.
     // If capture fails, still force cleanup below, but do not claim success.
@@ -145,7 +144,12 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
     const id = ++nextId;
     pending.set(id, { method, resolve, reject });
     try { send({ jsonrpc: '2.0', id, method, params }); }
-    catch { pending.delete(id); reject(new Error('Unable to send CodeBuddy ACP request')); }
+    catch { pending.delete(id); reject(new Error('Unable to send CodeBuddy ACP request')); return; }
+    if (method !== 'session/prompt') {
+      rpcTimer = setTimeout(() => fail(Object.assign(
+        new Error(`CodeBuddy ACP ${method} did not respond within ${timeoutMs}ms`), { name: 'TimeoutError' },
+      )), timeoutMs);
+    }
   });
   const update = (params: JsonObject): void => {
     if (typeof params.sessionId !== 'string' || !params.sessionId || params.sessionId.length > 512 || !object(params.update)) throw protocolError();
@@ -254,10 +258,11 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
     if (!validId(value.id) || owns(value, 'params') || owns(value, 'result') === owns(value, 'error')) throw protocolError();
     const entry = pending.get(value.id);
     if (!entry) throw protocolError();
+    if (entry.method === 'session/prompt') promptResponded = true;
+    else clearTimeout(rpcTimer);
     if (owns(value, 'error')) {
       if (!object(value.error) || !Number.isSafeInteger(value.error.code) || typeof value.error.message !== 'string') throw protocolError();
       pending.delete(value.id);
-      if (entry.method === 'session/prompt') { promptResponded = true; clearTimeout(timer); }
       // Keep authentication routing authoritative; classify only the explicit
       // RPC error surface for quota/rate limits without relaying server secrets.
       const cause = value.error.code === -32000
@@ -272,10 +277,6 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
         if (setupSessionId && setupSessionId !== value.result.sessionId) throw protocolError();
         sessionId = value.result.sessionId;
       }
-      // A matched setup response starts the next phase's idle budget. Prompt
-      // completion ends the watchdog even if the consumer is draining events.
-      if (entry.method === 'session/prompt') { promptResponded = true; clearTimeout(timer); }
-      else if (!promptResponded) timer.refresh();
       pending.delete(value.id); entry.resolve(value.result);
     }
   };
@@ -308,11 +309,6 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
     catch { fail(new Error('CodeBuddy ACP spawn callback failed')); }
   };
   const onAbort = (): void => fail(abortError());
-  // Only validated task progress and matched setup replies renew this watchdog:
-  // stderr, partial frames and unrelated metadata cannot keep a
-  // stalled task alive. Explicit cancellation and bounded cleanup stay unchanged.
-  const onTimeout = (): void => fail(Object.assign(new Error(`CodeBuddy ACP request timed out after ${timeoutMs}ms without progress`), { name: 'TimeoutError' }));
-  let timer = setTimeout(onTimeout, timeoutMs);
   request.signal?.addEventListener('abort', onAbort, { once: true });
   child.once('spawn', onSpawn);
   child.on('error', onProcessError);
@@ -381,10 +377,6 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
             throw error;
           }
           attempted.add(nextModel);
-          // Completion suspended the watchdog. Bound set_model too, while still
-          // rejecting late execution frames between prompt rounds.
-          clearTimeout(timer);
-          timer = setTimeout(onTimeout, timeoutMs);
           const switched = await rpc('session/set_model', { sessionId, modelId: nextModel });
           if (!object(switched) || switched.modelId !== nextModel) throw new Error('CodeBuddy 未确认候选模型切换，已停止任务以避免重复执行。');
           if (failure || stopping || request.signal?.aborted) throw failure ?? abortError();
@@ -396,7 +388,6 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
           // This is a new user turn in that same session, not an exact token resume.
           prompt = '上一次请求因 HTTP 429 中断，已切换模型。请根据当前会话历史继续尚未完成的原任务，不要重复已经完成的工具操作；如果任务已经完成，直接总结结果。';
           promptResponded = false;
-          timer.refresh();
         }
       }
     } catch (error) { fail(error instanceof Error ? error : new Error('CodeBuddy ACP request failed')); }
@@ -432,7 +423,7 @@ export async function* runCodeBuddyAcp(request: CodeBuddyRequest): AsyncGenerato
     hasPrimaryError = true;
     throw error;
   } finally {
-    clearTimeout(timer);
+    clearTimeout(rpcTimer);
     request.signal?.removeEventListener('abort', onAbort);
     rejectPending(failure ?? new Error('CodeBuddy ACP consumer closed'));
     await terminate(!finished);

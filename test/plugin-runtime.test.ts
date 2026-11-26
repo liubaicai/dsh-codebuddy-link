@@ -131,7 +131,7 @@ test('panel cannot raise administrator concurrency or interrupt active and queue
     const waiting = f.ask('ARGV')
     for (let i=0; i<100 && f.runs().length < 2; i++) await new Promise(resolve => setImmediate(resolve))
     assert.equal(f.runs()[0]!.state,'queued')
-    await f.update({maxConcurrency:2,stallWarnMs:0},400)
+    await f.update({maxConcurrency:2},400)
     assert.equal(f.runs()[0]!.state,'queued')
     assert.equal(f.runs().find(run => run.source==='model')?.state,'responding')
     stop.abort(); await running
@@ -139,14 +139,24 @@ test('panel cannot raise administrator concurrency or interrupt active and queue
   } finally {stop.abort(); await running}
 })
 
-test('execution timeout frees shared slot and remains distinct from queue timeout', async t => {
-  const f = await fixture(t,{timeoutMs:500,queueTimeoutMs:5000})
-  const started = deferred()
-  const running = f.model({messages:[{id:'m1' as Message['id'],source:{kind:'user'},role:'user',content:[{type:'text',text:'HOLD'}]}]},started.resolve)
-  await started.promise
-  const next = f.ask('ARGV')
-  await running
-  assert.equal(f.runs().find(run => run.source==='model')?.failure,'timeout')
-  assert.ok(JSON.parse(await next).includes('--print'))
-  assert.equal(f.runs()[0]!.state,'completed')
+test('saving the inactivity threshold updates a live ACP warning without cancelling the task', {timeout:20000}, async t => {
+  const f = await fixture(t,{timeoutMs:1500})
+  const started = deferred(), stop = new AbortController()
+  const running = f.model({messages:[{id:'m1' as Message['id'],source:{kind:'user'},role:'user',content:[{type:'text',text:'HOLD'}]}],signal:stop.signal},started.resolve)
+  try {
+    await Promise.race([started.promise, running.then(() => assert.fail('ACP prompt ended before it started'))])
+    await new Promise(resolve => setTimeout(resolve,1800))
+    assert.equal(f.runs()[0]!.warning,false)
+    const updated = await f.update({stallWarnMs:1000})
+    assert.equal(updated.config.stallWarnMs,1000)
+    assert.equal(updated.runs[0].state,'responding')
+    assert.equal(updated.runs[0].warning,true)
+    assert.equal(updated.runs[0].failure,undefined)
+    assert.equal((await f.update({stallWarnMs:0})).runs[0].warning,false)
+  } finally {
+    stop.abort()
+    await running
+  }
+  assert.equal(f.runs()[0]!.state,'cancelled')
+  assert.ok(JSON.parse(await f.ask('ARGV')).includes('--print'))
 })

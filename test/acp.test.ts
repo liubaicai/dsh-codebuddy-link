@@ -160,17 +160,18 @@ input.on('line', line => {
    else if(kind==='terminal') {
     if(terminalOutputChunk)update({sessionUpdate:'terminal_output_chunk',terminalId:'term_1',data:Buffer.from('private terminal output').toString('base64')});
    } else text('working');
-   if(count===12){clearInterval(tick);if(kind!=='stall')reply(row.id,{stopReason:'end_turn'});}
+   if(count===4){clearInterval(tick);reply(row.id,{stopReason:'end_turn'});}
   },200);
   return;
  }
  if(mode==='noise') {
-  setInterval(()=>{
+  const noise = setInterval(()=>{
    process.stderr.write('private diagnostic');text('');
    update({sessionUpdate:'session_info_update',title:'unchanged'});
    update({sessionUpdate:'terminal_output_chunk',terminalId:'term_1',data:''});
    send({jsonrpc:'2.0',method:'unknown_notification'});
   },100);
+  setTimeout(()=>{clearInterval(noise);text('answer');reply(row.id,{stopReason:'end_turn'});},2200);
   return;
  }
  if(mode === 'idle')return;
@@ -279,7 +280,7 @@ test('pre-session metadata keeps strict phase, shape and session binding checks'
   }
 });
 
-test('pre-session metadata does not renew the progress-based idle timeout', {timeout:15000}, async t => {
+test('pre-session metadata does not extend the session setup RPC deadline', {timeout:15000}, async t => {
   const f = await fixture(t);
   await writeFile(join(f.cwd,'setup.json'),JSON.stringify({stall:true,notifications:[{sessionId:'fresh-session',update:{sessionUpdate:'current_mode_update',currentModeId:'default'}}]}));
   await assert.rejects(collect(runCodeBuddyAcp({...f,prompt:'messages',timeoutMs:1500})),{name:'TimeoutError'});
@@ -327,7 +328,7 @@ test('successful completion still captures and kills native descendants', {timeo
  await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
 });
 
-test('cleanup capture failure preserves primary auth, abort, timeout and protocol errors, but rejects success', {skip:process.platform!=='win32',timeout:30000}, async t => {
+test('cleanup capture failure preserves primary auth, abort and protocol errors, but rejects success', {skip:process.platform!=='win32',timeout:30000}, async t => {
  const original=process.env.SystemRoot;
  const restore=()=>{if(original===undefined)delete process.env.SystemRoot;else process.env.SystemRoot=original;};
  const onSpawn=()=>{process.env.SystemRoot='Z:\\missing-SECRET_TOKEN-private-root';};
@@ -336,12 +337,11 @@ test('cleanup capture failure preserves primary auth, abort, timeout and protoco
    ['auth','CodeBuddyAuthError',/requires authorization/],
    ['error','Error',/server error details omitted/],
    ['malformed','Error',/Invalid or oversized/],
-   ['idle','TimeoutError',/timed out/],
    ['env','Error',/descendant capture failed/],
   ] as const) {
    restore();
    const f=await fixture(t);const events:BridgeEvent[]=[];
-   await assert.rejects(async()=>{for await(const event of runCodeBuddyAcp({...f,prompt,onSpawn,timeoutMs:prompt==='idle'?1000:10000}))events.push(event);},error=>{
+   await assert.rejects(async()=>{for await(const event of runCodeBuddyAcp({...f,prompt,onSpawn}))events.push(event);},error=>{
     assert.ok(error instanceof Error);assert.equal(error.name,name,error.message);assert.match(error.message,pattern);
     assert.doesNotMatch(error.message,/SECRET_TOKEN|private-root|private\.invalid/);
     if(prompt!=='env') {
@@ -531,45 +531,31 @@ test('active cancellation sends session/cancel, kills process tree and removes s
   await dead(Number(await readFile(join(f.cwd, 'server.pid'), 'utf8')));
 });
 
-test('ACP progress renews the idle budget for text, thoughts, tools and native terminal output', {timeout:30000}, async t => {
+test('ACP reports progress for text, thoughts, tool updates and native terminal output', {timeout:30000}, async t => {
   for (const kind of ['terminal','text','thought','tool']) {
     const f = await fixture(t);
-    const start = Date.now();
     let progressEvents = 0;
-    const events = await collect(runCodeBuddyAcp({...f,prompt:`progress:${kind}`,timeoutMs:1500,onProgress:()=>{ progressEvents++; }}));
-    assert.ok(Date.now()-start > 1500, 'task must outlive the old total deadline');
-    if (kind==='terminal') assert.deepEqual({ progressEvents, events }, {
-      progressEvents: 12, events: [{type:'result',sessionId:'fresh-session',text:''}],
-    });
+    const events = await collect(runCodeBuddyAcp({...f,prompt:`progress:${kind}`,onProgress:()=>{ progressEvents++; }}));
+    assert.equal(progressEvents, kind==='tool' ? 5 : 4);
+    if (kind==='terminal') assert.deepEqual(events, [{type:'result',sessionId:'fresh-session',text:''}]);
     const result = events.at(-1);
     assert.equal(result?.type, 'result');
-    if (kind==='text') assert.equal(result?.type==='result' && result.text, 'working'.repeat(12));
+    if (kind==='text') assert.equal(result?.type==='result' && result.text, 'working'.repeat(4));
     await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
   }
 });
 
-test('ACP times out after progress stops, not from the original start time', {timeout:15000}, async t => {
+test('ACP waits for a quiet prompt and ignores diagnostic noise as progress', {timeout:15000}, async t => {
   const f = await fixture(t);
-  let chunks = 0;
-  let lastProgress = 0;
-  await assert.rejects(async () => {
-    for await (const event of runCodeBuddyAcp({...f,prompt:'progress:stall',timeoutMs:1500})) {
-      if (event.type==='text') { chunks++; lastProgress=Date.now(); }
-    }
-  }, {name:'TimeoutError',message:'CodeBuddy ACP request timed out after 1500ms without progress'});
-  assert.equal(chunks,12);
-  assert.ok(Date.now()-lastProgress >= 1400);
-  assert.equal(await readFile(join(f.cwd,'cancelled'),'utf8'),'yes');
+  let progressEvents = 0;
+  const events = await collect(runCodeBuddyAcp({...f,prompt:'noise',timeoutMs:1500,signal:t.signal,onProgress:()=>{ progressEvents++; }}));
+  assert.deepEqual(events, [{type:'text',delta:'answer'},{type:'result',sessionId:'fresh-session',text:'answer'}]);
+  assert.equal(progressEvents,1);
+  assert.equal((await wire(f.cwd)).some(row=>row.method==='session/cancel'),false);
   await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
 });
 
-test('stderr, empty chunks and unrelated metadata do not renew the ACP idle budget', {timeout:15000}, async t => {
-  const f = await fixture(t);
-  await assert.rejects(collect(runCodeBuddyAcp({...f,prompt:'noise',timeoutMs:1500})), {name:'TimeoutError'});
-  await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
-});
-
-test('ACP completion stops the idle watchdog while the consumer holds a streamed event', {timeout:15000}, async t => {
+test('ACP completion survives a paused stream consumer', {timeout:15000}, async t => {
   const f = await fixture(t);
   const events: BridgeEvent[] = [];
   let held = false;
@@ -592,13 +578,6 @@ test('explicit cancellation still stops an ACP task with ongoing progress', {tim
   assert.equal(getEventListeners(controller.signal,'abort').length,0);
   assert.equal(await readFile(join(f.cwd,'cancelled'),'utf8'),'yes');
   await dead(Number(await readFile(join(f.cwd,'server.pid'),'utf8')));
-});
-
-test('timeout sends cancellation and cleans up the process tree', async t => {
-  const f = await fixture(t);
-  await assert.rejects(collect(runCodeBuddyAcp({ ...f, prompt: 'hang', timeoutMs: 1500 })), { name: 'TimeoutError' });
-  assert.equal(await readFile(join(f.cwd, 'cancelled'), 'utf8'), 'yes');
-  await dead(Number(await readFile(join(f.cwd, 'child.pid'), 'utf8')));
 });
 
 test('cancellation cleans descendants even when parent exits on cancel', async t => {

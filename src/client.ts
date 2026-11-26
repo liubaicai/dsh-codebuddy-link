@@ -189,7 +189,7 @@ function parseStatus(value: unknown): Status {
   const reasoningEffort = c.reasoningEffort ?? 'auto';
   const maxConcurrency = c.maxConcurrency ?? 2;
   const queueTimeoutMs = c.queueTimeoutMs ?? 600000;
-  const stallWarnMs = c.stallWarnMs ?? 90000;
+  const stallWarnMs = c.stallWarnMs ?? 600000;
   if (typeof reasoningEffort !== 'string' || !efforts.includes(reasoningEffort) || !bounded(maxConcurrency, 1, 16)
     || !bounded(queueTimeoutMs, 1, 2147483647) || !bounded(stallWarnMs, 0, 2147483647)) throw new Error('服务端状态格式无效');
   return { settingsError: typeof value.settingsError === 'string' && value.settingsError.length > 0,
@@ -319,13 +319,18 @@ function renderRun(run: RunSnapshot): unknown {
     h('p', null, `DSH 上下文预算：${run.contextWindow ?? '未知'}；来源：${run.contextSource === 'model' ? '模型元数据' : run.contextSource === 'fallback' ? '回退配置' : '未知'}；未向 CLI 覆盖上下文限制`),
     h('p', null, `积分：${amount(run.totalCredits)}；费用（USD）：${amount(run.totalCostUsd)}`),
     h('p', null, `入队：${time(run.queuedAt)}；开始：${time(run.startedAt)}；进展：${time(run.lastProgressAt)}；结束：${time(run.endedAt)}`),
-    run.warning ? h('p', {role:'status'}, '长时间无进展，仍在等待；这不代表调用失败。') : null,
+    run.warning ? h('p', {role:'status'}, '长时间无进展，仍在等待。') : null,
     run.failure ? h('p', null, failures[run.failure]) : null);
 }
 
 function SettingsPanel(): unknown {
   const [status, storeStatus] = useState<Status | null>(null);
   const [draft, setDraft] = useState<Config | null>(null);
+  const [stallMinutes, setStallMinutes] = useState<string | null>(null);
+  const stallMinutesValue = stallMinutes?.trim() ? Number(stallMinutes) : NaN;
+  const stallWarnMs = Math.round(stallMinutesValue * 60_000);
+  const validStall = stallMinutes === null || (bounded(stallWarnMs, 0, 2147483647)
+    && (stallMinutesValue === 0 || stallWarnMs > 0));
   const [busy, setBusy] = useState('加载中');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -419,7 +424,7 @@ function SettingsPanel(): unknown {
   }
 
   async function load(action: 'initial' | 'refresh' | 'config' | 'models', config?: Config): Promise<void> {
-    if (!active.current || pending.current || authPending.current || (action === 'config' && settingsError.current)) return;
+    if (!active.current || pending.current || authPending.current || (action === 'config' && (settingsError.current || !validStall))) return;
     pending.current = true;
     const ticket = ++sequence.current;
     setBusy(action === 'config' ? '保存中' : action === 'refresh' ? '刷新中' : '加载中'); setError(''); setNotice('');
@@ -432,10 +437,11 @@ function SettingsPanel(): unknown {
         const result = await request(endpoint, endpoint === 'status' ? undefined : endpoint === 'models' ? {} : {
           permissionMode: config!.permissionMode, dangerouslySkipPermissions: config!.dangerouslySkipPermissions,
           models: config!.models, hiddenModels: config!.hiddenModels, defaultModel: config!.defaultModel, fallbackModels: config!.fallbackModels, reasoningEffort: config!.reasoningEffort,
+          ...(stallMinutes === null ? {} : {stallWarnMs}),
         });
         if (!current()) return;
         setStatus(result);
-        if (action === 'config') setDraft(result.config);
+        if (action === 'config') { setDraft(result.config); setStallMinutes(null); }
         else setDraft(previous => previous ?? result.config);
       }
       if (action === 'initial' || action === 'refresh') await refreshAccount(current);
@@ -597,12 +603,22 @@ function SettingsPanel(): unknown {
           h('option', {value:'dontAsk'}, '不询问'), h('option', {value:'plan'}, '规划模式'), h('option', {value:'acceptEdits'}, '接受编辑'))),
         h('label', {style:field}, '默认推理强度', h('select', {value:draft.reasoningEffort, onChange:(event:{target:{value:string}}) => update({reasoningEffort:event.target.value})},
           ...efforts.map(effort => h('option', {key:effort, value:effort}, effort))))),
+      h('div', {style:{...field, marginBottom:'12px'}},
+        h('label', {style:{...row, width:'fit-content'}}, '无进展超时（分钟）', h('input', {
+          type:'number', name:'stallWarnMinutes', min:0, max:2147483647 / 60_000, step:'any', style:{width:'90px'},
+          value:stallMinutes ?? String(draft.stallWarnMs / 60_000), 'aria-invalid':!validStall,
+          'aria-describedby':`${tooltipPrefix.current}-stall-help`,
+          onChange:(event:{target:{value:string}}) => {setStallMinutes(event.target.value); setNotice('');},
+        })),
+        h('span', {id:`${tooltipPrefix.current}-stall-help`, style:{fontSize:'12px', color:secondary}},
+          '达到设定时间后在运行记录中提醒，ACP 任务继续运行。填 0 关闭提醒。'),
+        !validStall ? h('span', {role:'alert'}, '请输入有效分钟数。') : null),
       h('div', {style:{...row, justifyContent:'space-between'}},
         h('div', {style:row}, h('label', {style:{...row, gap:'4px'}},
           h('input', {type:'checkbox', name:'dangerouslySkipPermissions', checked:draft.dangerouslySkipPermissions,
             onChange:(event:{target:{checked:boolean}}) => update({dangerouslySkipPermissions:event.target.checked})}), '跳过 CLI 权限检查'),
           help('danger', '跳过 CLI 权限检查风险说明', dangerHelp, '危险')),
-        h('button', {type:'button', disabled:locked || !!status?.settingsError || !validDefault || !validMode || !validEffort, onClick:() => void load('config', draft)}, '保存设置')),
+        h('button', {type:'button', disabled:locked || !!status?.settingsError || !validDefault || !validMode || !validEffort || !validStall, onClick:() => void load('config', draft)}, '保存设置')),
       !validDefault || !validMode || !validEffort ? h('p', {role:'alert'}, '请选择有效的权限模式、推理强度与已启用的默认模型。') : null) : null,
     h('details', {style:box, 'aria-label':'运行记录'},
       h('summary', {style:{cursor:'pointer', fontWeight:600}}, `运行记录（${status?.runs.length ?? 0}）`),

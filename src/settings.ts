@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { resolveConfig, type PluginConfig } from './config.ts'
 
-const panelEditable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'fallbackModels', 'reasoningEffort', 'dangerouslySkipPermissions'])
+const panelEditable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'fallbackModels', 'reasoningEffort', 'dangerouslySkipPermissions', 'stallWarnMs'])
 // Persistence/internal updates also retain legacy administrator settings and discovered metadata.
 const editable = new Set(['permissionMode', 'models', 'hiddenModels', 'defaultModel', 'fallbackModels', 'tools', 'modelContext',
   'reasoningEffort', 'maxConcurrency', 'queueTimeoutMs', 'stallWarnMs', 'dangerouslySkipPermissions'])
@@ -43,6 +43,7 @@ export class SettingsStore {
   updateFromPanel(patch: unknown): PluginConfig {
     const updates = withoutRetired(validateKeys(patch))
     if (Object.keys(updates).some(key => !panelEditable.has(key))) throw new Error('Setting is administrator-only')
+    if (Object.hasOwn(updates, 'stallWarnMs') && typeof updates.stallWarnMs !== 'number') throw new Error('Invalid progress warning duration')
     return this.update(updates)
   }
   update(patch: unknown): PluginConfig {
