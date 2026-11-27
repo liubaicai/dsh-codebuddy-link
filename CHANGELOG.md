@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Keep the live CodeBuddy reasoning preview scrolled to the newest output. Scrolling up pauses following, and returning to the bottom resumes it.
+
 ## 0.4.0
 
 - Add an expanded CodeBuddy reasoning preview to supported DSH chat views. It remains available during native tool execution and closes when the final answer is committed. Saved reasoning stays in the original transcript.

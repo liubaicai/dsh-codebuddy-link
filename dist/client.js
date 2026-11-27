@@ -599,22 +599,39 @@ const progressDefinition = {
             anchorSeq: start.event.seq, location: start.location, visibility: 'visible', data: { text: state.text } };
     },
 };
+function progressText(raw) {
+    const signature = '<signature>';
+    if (signature.startsWith(raw))
+        return '';
+    if (!raw.startsWith(signature))
+        return raw;
+    const end = raw.indexOf('</signature>', signature.length);
+    return end === -1 ? '' : raw.slice(end + '</signature>'.length).trimStart();
+}
+// Reader-intent tolerance: content this close to the end keeps following the newest reasoning.
+const FOLLOW_SLACK = 24;
 function ProgressRow(props) {
     const { node } = props;
-    let text = node.data.text;
-    const signature = '<signature>';
-    if (signature.startsWith(text))
-        return null;
-    if (text.startsWith(signature)) {
-        const end = text.indexOf('</signature>', signature.length);
-        if (end === -1)
-            return null;
-        text = text.slice(end + '</signature>'.length).trimStart();
-    }
+    const text = progressText(node.data.text);
+    const body = useRef(null);
+    const following = useRef(true);
+    const followLatest = () => {
+        const box = body.current;
+        if (box && box.clientHeight > 0 && following.current)
+            box.scrollTop = box.scrollHeight;
+    };
+    useEffect(followLatest, [text]);
     if (!text)
         return null;
-    return h('details', { open: true, style: { color: secondary, fontSize: '13px', lineHeight: 1.6 } }, h('summary', { style: { cursor: 'pointer' } }, 'CodeBuddy 思考'), h('div', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 'min(400px, 50vh)',
-            overflowY: 'auto', paddingTop: '4px' } }, text));
+    return h('details', { open: true, onToggle: followLatest, style: { color: secondary, fontSize: '13px', lineHeight: 1.6 } }, h('summary', { style: { cursor: 'pointer' } }, 'CodeBuddy 思考'), h('div', {
+        ref: body,
+        onScroll: (event) => {
+            const box = event.currentTarget;
+            following.current = box.scrollHeight - box.scrollTop - box.clientHeight <= FOLLOW_SLACK;
+        },
+        style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 'min(400px, 50vh)',
+            overflowY: 'auto', paddingTop: '4px' },
+    }, text));
 }
 function apply(ctx) {
     ctx.inject?.(['uiConversation'], scope => {

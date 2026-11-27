@@ -57,9 +57,13 @@ function harness(replies: Reply[] = [{ value: payload() }], withConversation = f
           if (!(index in state)) state[index] = { current: initial };
           return state[index];
         },
-        useEffect: (effect: () => void | (() => void)) => {
+        useEffect: (effect: () => void | (() => void), deps: unknown[]) => {
           const index = cursor++;
-          if (!(index in state)) { state[index] = true; effects.push(effect); setups.push(effect); }
+          const previous = state[index] as unknown[] | undefined;
+          if (previous?.length === deps.length && deps.every((value, i) => Object.is(value, previous[i]))) return;
+          state[index] = deps;
+          effects.push(effect);
+          setups.push(effect);
         },
       };
     },
@@ -92,12 +96,16 @@ function harness(replies: Reply[] = [{ value: payload() }], withConversation = f
     },
   } : {}) });
   function render(): Element {
+    return renderComponent(registrations[0]!.component) as Element;
+  }
+  function renderComponent(component: () => unknown, attach?: (tree: unknown) => void): unknown {
     cursor = 0;
-    const tree = registrations[0]!.component() as Element;
+    const tree = component();
+    attach?.(tree);
     while (effects.length) { const dispose = effects.shift()!(); if (dispose) cleanup.push(dispose); }
     return tree;
   }
-  return { exported, registrations, disposers, calls, state, render, cleanup, timers, definition: () => definition,
+  return { exported, registrations, disposers, calls, state, render, renderComponent, cleanup, timers, definition: () => definition,
     remount: () => { cleanup.splice(0).forEach(dispose => dispose()); for (const setup of setups) { const dispose = setup(); if (dispose) cleanup.push(dispose); } },
     tick: () => { for (const callback of timers.values()) callback(); }, disposed: () => disposed };
 }
@@ -852,6 +860,51 @@ test('CodeBuddy progress row opens on marked live reasoning and retires when the
   app.disposers.forEach(dispose => dispose());
   assert.equal(app.definition(), undefined);
   assert.equal(app.disposed(), 4);
+});
+
+test('CodeBuddy thinking follows new content until the reader scrolls back', () => {
+  const app = harness([], true);
+  const row = app.registrations.find(entry => entry.options.key === 'codebuddy-link-progress')!;
+  let top = 0;
+  const box = {
+    scrollHeight: 1_000,
+    clientHeight: 100,
+    get scrollTop() { return top; },
+    set scrollTop(value: number) { top = Math.min(value, this.scrollHeight - this.clientHeight); },
+  };
+  const body = (tree: unknown) => ((tree as Element).children[1] as Element).props;
+  const renderRow = (text: string) => app.renderComponent(() => row.component({ node: { data: { text } } }), tree => {
+    if (tree) body(tree).ref.current = box;
+  }) as Element | null;
+
+  assert.equal(renderRow('<signature>opaque'), null);
+  const first = renderRow('<signature>opaque</signature>\n第一段思考')!;
+  assert.doesNotMatch(content(first), /opaque/);
+  assert.equal(box.scrollTop, 900, 'the first visible output can already overflow');
+  box.scrollHeight = 1_400;
+  const second = renderRow('第一段思考\n第二段')!;
+  assert.equal(box.scrollTop, 1_300);
+
+  box.scrollTop = 200;
+  body(second).onScroll({ currentTarget: box });
+  box.scrollHeight = 1_800;
+  const third = renderRow('第一段思考\n第二段\n第三段')!;
+  assert.equal(box.scrollTop, 200);
+
+  box.scrollTop = 1_700;
+  body(third).onScroll({ currentTarget: box });
+  box.scrollHeight = 2_000;
+  const fourth = renderRow('第一段思考\n第二段\n第三段\n第四段')!;
+  assert.equal(box.scrollTop, 1_900);
+
+  box.clientHeight = 0;
+  box.scrollTop = 0;
+  box.scrollHeight = 2_400;
+  const reopened = renderRow(`${content(fourth)}\n第五段`)!;
+  assert.equal(box.scrollTop, 0);
+  box.clientHeight = 100;
+  reopened.props.onToggle();
+  assert.equal(box.scrollTop, 2_300);
 });
 
 test('client has no unsafe HTML, persistence, logging or direct DOM access and clears polling', async () => {
