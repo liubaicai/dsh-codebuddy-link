@@ -28,7 +28,7 @@ npm install -g @tencent-ai/codebuddy-code
 需要本机安装 Git。公开仓库使用 HTTPS，不要求 SSH 密钥。将 `web` 替换成实际使用的 DSH profile：
 
 ```sh
-dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.3.33"
+dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-link.git#v0.4.1"
 ```
 
 仓库**包含已构建的 dist**，安装不依赖 TypeScript、开发依赖或安装时构建脚本。CI 会重新构建并检查提交的产物，避免源码与产物不一致。
@@ -41,13 +41,13 @@ dsh plugin --profile web add "git+https://github.com/liubaicai/dsh-codebuddy-lin
 
 ### 3. 无 Git 安装：使用 Release 包
 
-从 [Releases](https://github.com/liubaicai/dsh-codebuddy-link/releases) 下载对应版本 `.tgz`，可使用同页 `SHA256SUMS.txt` 核对 SHA-256。进入下载目录后执行：
+从 [v0.4.1 发布页](https://github.com/liubaicai/dsh-codebuddy-link/releases/tag/v0.4.1) 下载 `.tgz`，可使用同页 `SHA256SUMS.txt` 核对 SHA-256。进入下载目录后执行：
 
 ```powershell
-dsh plugin --profile web add .\dsh-codebuddy-link-0.3.33.tgz
+dsh plugin --profile web add .\dsh-codebuddy-link-0.4.1.tgz
 ```
 
-macOS/Linux 使用 `./dsh-codebuddy-link-0.3.33.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
+macOS/Linux 使用 `./dsh-codebuddy-link-0.4.1.tgz`。本地文件请带 `./`、`.\` 或使用绝对路径，不要只给裸文件名。
 
 ### 4. 启用与升级
 
