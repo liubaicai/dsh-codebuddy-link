@@ -78,7 +78,10 @@ export class CodeBuddyAdapter extends LlmAdapter {
       const chunks: StreamChunk[] = []
       if (open !== type) {
         chunks.push(...close()); open = type
-        chunks.push({ type: 'block-start', index, blockType: type })
+        // The block-start marker survives Web reconnect replay without entering the text or final answer.
+        const start: StreamChunk & { codebuddyProgress?: true } = { type: 'block-start', index, blockType: type }
+        if (autonomous && type === 'reasoning') start.codebuddyProgress = true
+        chunks.push(start)
       }
       accumulated += text
       chunks.push({ type: type === 'text' ? 'text-delta' : 'reasoning-delta', index, text })

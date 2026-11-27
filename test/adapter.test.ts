@@ -81,6 +81,10 @@ test('ordinary calls use native tools and show progress as reasoning before the 
     yield {type:'result',text:'done',sessionId:'s'}
   }
   const out = await collect(new CodeBuddyAdapter(providerConfig(), runner).stream({...options, system:'host instructions', tools:dshTools}))
+  assert.deepEqual(out.filter(c => c.type === 'block-start'), [
+    {type:'block-start', index:0, blockType:'reasoning', codebuddyProgress:true},
+    {type:'block-start', index:1, blockType:'text'},
+  ])
   assert.deepEqual(out.filter(c => c.type === 'block-end').map(c => c.block), [{type:'reasoning',text:'thinkworking'},{type:'text',text:'done'}])
   assert.deepEqual(out.at(-2), {type:'usage',usage:{inputTokens:10,outputTokens:5,cacheReadTokens:3,cacheWriteTokens:2}})
   assert.deepEqual(out.at(-1), {type:'finish',reason:{kind:'stop'},replayState:{response:{sessionId:'s'}}})

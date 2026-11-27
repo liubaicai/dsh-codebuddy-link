@@ -35,6 +35,9 @@ export interface ClientContext {
     inject(name: string, register: () => () => void): void;
     register(options: { name: string; id?: string; key?: string; order?: number; label?: string }, component: (props?: unknown) => unknown): () => void;
   };
+  inject?(services: readonly ['uiConversation'], callback: (scope: ClientContext & {
+    uiConversation: { events: { register(definition: typeof progressDefinition): () => void } };
+  }) => void): void;
 }
 
 type PermissionMode = 'dontAsk' | 'plan' | 'acceptEdits';
@@ -625,7 +628,103 @@ function SettingsPanel(): unknown {
       h('p', {style:{fontSize:'12px'}}, '当前进程内存最近 5 条，每 2 秒刷新；不保存提示词或原始输出。'),
       h('div', {style:{maxHeight:'360px', overflowY:'auto'}}, ...(status?.runs.length ? status.runs.map(renderRun) : [h('p', null, '暂无运行记录')]))));
 }
+const progressKind = 'codebuddy-link-progress';
+
+type StepEvent = { seq: number; data: { turn: number; step: number } };
+type ProgressChunk = { type: string; blockType?: string; codebuddyProgress?: true; text?: string };
+type LiveEvent = StepEvent & { type: 'assistant/live-chunk'; data: { attemptId: string; chunk: ProgressChunk } };
+type SettlementEvent = StepEvent & { type: 'assistant/message'; data: { stream?: readonly { chunk?: ProgressChunk }[] } };
+type ProgressMatch = { event: LiveEvent | SettlementEvent; location: { kind: string; turn?: { status: string }; step?: { status: string } } };
+type ProgressState = { attemptId: string; text: string; settled: boolean };
+type ProgressContext = {
+  key: string;
+  id: string;
+  start?: ProgressMatch;
+  state?: ProgressState;
+  current: ReadonlyMap<string, ProgressNode>;
+};
+type ProgressNode = {
+  key: string;
+  id: string;
+  kind: typeof progressKind;
+  target: 'chat';
+  groupTree: 'process';
+  anchorSeq: number;
+  location: ProgressMatch['location'];
+  visibility: 'hidden' | 'visible';
+  data: { text: string };
+};
+
+function progressStep(event: StepEvent): string {
+  return `${event.data.turn}:${event.data.step}`;
+}
+
+function isProgressStart(chunk: ProgressChunk | undefined): boolean {
+  return chunk?.type === 'block-start' && chunk.blockType === 'reasoning' && chunk.codebuddyProgress === true;
+}
+
+const progressDefinition = {
+  kind: progressKind,
+  target: 'chat',
+  match: {
+    'assistant/live-chunk': (event: LiveEvent) => {
+      if (isProgressStart(event.data.chunk)) return { id: progressStep(event), role: 'start' };
+      if (event.data.chunk.type === 'reasoning-delta') return { id: progressStep(event), role: 'update' };
+      return null;
+    },
+    // The Host may retain final live chunks until step/end. Retire the preview when the answer commits.
+    'assistant/message': (event: SettlementEvent) => event.data.stream?.some(record => isProgressStart(record.chunk))
+      ? { id: progressStep(event), role: 'update' } : null,
+  },
+  start: (_context: unknown, { event }: { event: LiveEvent }): ProgressState => ({
+    attemptId: event.data.attemptId, text: '', settled: false,
+  }),
+  update: ({ state }: { state: ProgressState }, { event }: ProgressMatch): ProgressState => {
+    if (event.type === 'assistant/message') return { ...state, settled: true };
+    if (isProgressStart(event.data.chunk) && event.data.attemptId !== state.attemptId) {
+      return { attemptId: event.data.attemptId, text: '', settled: false };
+    }
+    if (state.settled || event.data.attemptId !== state.attemptId || event.data.chunk.type !== 'reasoning-delta') return state;
+    return { ...state, text: state.text + (event.data.chunk.text ?? '') };
+  },
+  publication: (match: ProgressMatch) => match.event.type === 'assistant/live-chunk' ? 'animation-frame' : 'immediate',
+  buildViewNode: (context: ProgressContext): ProgressNode | null => {
+    const { start, state } = context;
+    const previous = context.current.get('chat');
+    if (!start || !state || state.settled || start.location.turn?.status === 'closed'
+      || start.location.step?.status === 'closed' || !state.text.trim()) {
+      return previous ? { ...previous, visibility: 'hidden', data: { text: '' } } : null;
+    }
+    return { key: context.key, id: context.id, kind: progressKind, target: 'chat', groupTree: 'process',
+      anchorSeq: start.event.seq, location: start.location, visibility: 'visible', data: { text: state.text } };
+  },
+};
+
+function ProgressRow(props?: unknown): unknown {
+  const { node } = props as { node: ProgressNode };
+  let text = node.data.text;
+  const signature = '<signature>';
+  if (signature.startsWith(text)) return null;
+  if (text.startsWith(signature)) {
+    const end = text.indexOf('</signature>', signature.length);
+    if (end === -1) return null;
+    text = text.slice(end + '</signature>'.length).trimStart();
+  }
+  if (!text) return null;
+  return h('details', { open: true, style: { color: secondary, fontSize: '13px', lineHeight: 1.6 } },
+    h('summary', { style: { cursor: 'pointer' } }, 'CodeBuddy 思考'),
+    h('div', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 'min(400px, 50vh)',
+      overflowY: 'auto', paddingTop: '4px' } }, text));
+}
+
 export function apply(ctx: ClientContext): void {
+  ctx.inject?.(['uiConversation'], scope => {
+    scope.slots.inject('conversation.chat.node', () => {
+      const disposeRow = scope.slots.register({ name: 'conversation.chat.node', key: progressKind }, ProgressRow);
+      const disposeDefinition = scope.uiConversation.events.register(progressDefinition);
+      return () => { disposeDefinition(); disposeRow(); };
+    });
+  });
   ctx.slots.inject('settings.section', () => ctx.slots.register(
     { name: 'settings.section', id: 'codebuddy-link', order: 20, label: 'CodeBuddy' }, SettingsPanel));
   const pluginPanel = (props?: unknown) => isRecord(props) && props.view === 'summary' ? null : h(SettingsPanel);

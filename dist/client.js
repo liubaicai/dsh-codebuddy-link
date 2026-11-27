@@ -552,7 +552,78 @@ function SettingsPanel() {
     })), h('span', { id: `${tooltipPrefix.current}-stall-help`, style: { fontSize: '12px', color: secondary } }, '达到设定时间后在运行记录中提醒，ACP 任务继续运行。填 0 关闭提醒。'), !validStall ? h('span', { role: 'alert' }, '请输入有效分钟数。') : null), h('div', { style: { ...row, justifyContent: 'space-between' } }, h('div', { style: row }, h('label', { style: { ...row, gap: '4px' } }, h('input', { type: 'checkbox', name: 'dangerouslySkipPermissions', checked: draft.dangerouslySkipPermissions,
         onChange: (event) => update({ dangerouslySkipPermissions: event.target.checked }) }), '跳过 CLI 权限检查'), help('danger', '跳过 CLI 权限检查风险说明', dangerHelp, '危险')), h('button', { type: 'button', disabled: locked || !!status?.settingsError || !validDefault || !validMode || !validEffort || !validStall, onClick: () => void load('config', draft) }, '保存设置')), !validDefault || !validMode || !validEffort ? h('p', { role: 'alert' }, '请选择有效的权限模式、推理强度与已启用的默认模型。') : null) : null, h('details', { style: box, 'aria-label': '运行记录' }, h('summary', { style: { cursor: 'pointer', fontWeight: 600 } }, `运行记录（${status?.runs.length ?? 0}）`), h('p', { style: { fontSize: '12px' } }, '当前进程内存最近 5 条，每 2 秒刷新；不保存提示词或原始输出。'), h('div', { style: { maxHeight: '360px', overflowY: 'auto' } }, ...(status?.runs.length ? status.runs.map(renderRun) : [h('p', null, '暂无运行记录')]))));
 }
+const progressKind = 'codebuddy-link-progress';
+function progressStep(event) {
+    return `${event.data.turn}:${event.data.step}`;
+}
+function isProgressStart(chunk) {
+    return chunk?.type === 'block-start' && chunk.blockType === 'reasoning' && chunk.codebuddyProgress === true;
+}
+const progressDefinition = {
+    kind: progressKind,
+    target: 'chat',
+    match: {
+        'assistant/live-chunk': (event) => {
+            if (isProgressStart(event.data.chunk))
+                return { id: progressStep(event), role: 'start' };
+            if (event.data.chunk.type === 'reasoning-delta')
+                return { id: progressStep(event), role: 'update' };
+            return null;
+        },
+        // The Host may retain final live chunks until step/end. Retire the preview when the answer commits.
+        'assistant/message': (event) => event.data.stream?.some(record => isProgressStart(record.chunk))
+            ? { id: progressStep(event), role: 'update' } : null,
+    },
+    start: (_context, { event }) => ({
+        attemptId: event.data.attemptId, text: '', settled: false,
+    }),
+    update: ({ state }, { event }) => {
+        if (event.type === 'assistant/message')
+            return { ...state, settled: true };
+        if (isProgressStart(event.data.chunk) && event.data.attemptId !== state.attemptId) {
+            return { attemptId: event.data.attemptId, text: '', settled: false };
+        }
+        if (state.settled || event.data.attemptId !== state.attemptId || event.data.chunk.type !== 'reasoning-delta')
+            return state;
+        return { ...state, text: state.text + (event.data.chunk.text ?? '') };
+    },
+    publication: (match) => match.event.type === 'assistant/live-chunk' ? 'animation-frame' : 'immediate',
+    buildViewNode: (context) => {
+        const { start, state } = context;
+        const previous = context.current.get('chat');
+        if (!start || !state || state.settled || start.location.turn?.status === 'closed'
+            || start.location.step?.status === 'closed' || !state.text.trim()) {
+            return previous ? { ...previous, visibility: 'hidden', data: { text: '' } } : null;
+        }
+        return { key: context.key, id: context.id, kind: progressKind, target: 'chat', groupTree: 'process',
+            anchorSeq: start.event.seq, location: start.location, visibility: 'visible', data: { text: state.text } };
+    },
+};
+function ProgressRow(props) {
+    const { node } = props;
+    let text = node.data.text;
+    const signature = '<signature>';
+    if (signature.startsWith(text))
+        return null;
+    if (text.startsWith(signature)) {
+        const end = text.indexOf('</signature>', signature.length);
+        if (end === -1)
+            return null;
+        text = text.slice(end + '</signature>'.length).trimStart();
+    }
+    if (!text)
+        return null;
+    return h('details', { open: true, style: { color: secondary, fontSize: '13px', lineHeight: 1.6 } }, h('summary', { style: { cursor: 'pointer' } }, 'CodeBuddy 思考'), h('div', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', maxHeight: 'min(400px, 50vh)',
+            overflowY: 'auto', paddingTop: '4px' } }, text));
+}
 function apply(ctx) {
+    ctx.inject?.(['uiConversation'], scope => {
+        scope.slots.inject('conversation.chat.node', () => {
+            const disposeRow = scope.slots.register({ name: 'conversation.chat.node', key: progressKind }, ProgressRow);
+            const disposeDefinition = scope.uiConversation.events.register(progressDefinition);
+            return () => { disposeDefinition(); disposeRow(); };
+        });
+    });
     ctx.slots.inject('settings.section', () => ctx.slots.register({ name: 'settings.section', id: 'codebuddy-link', order: 20, label: 'CodeBuddy' }, SettingsPanel));
     const pluginPanel = (props) => isRecord(props) && props.view === 'summary' ? null : h(SettingsPanel);
     ctx.slots.inject('plugins.bundle.config', () => ctx.slots.register({ name: 'plugins.bundle.config', key: 'dsh-codebuddy-link' }, pluginPanel));

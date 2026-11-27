@@ -19,7 +19,7 @@ const payload = () => ({
   catalogModels: [{ id: 'basic', name: '基础模型' }, { id: 'hidden', name: '隐藏模型' }],
 });
 
-function harness(replies: Reply[] = [{ value: payload() }]) {
+function harness(replies: Reply[] = [{ value: payload() }], withConversation = false) {
   let cursor = 0;
   const state: any[] = [];
   const effects: (() => void | (() => void))[] = [];
@@ -77,17 +77,27 @@ function harness(replies: Reply[] = [{ value: payload() }]) {
   assert.equal(typeof factory, 'function');
   exported = factory(sandbox.require);
   assert.equal(typeof exported.apply, 'function');
-  exported.apply({ slots: {
+  const slots = {
     inject: (_slot: string, register: () => () => void) => disposers.push(register()),
     register: (options: any, component: (props?: unknown) => unknown) => { registrations.push({ options, component }); return () => { disposed++; }; },
-  } });
+  };
+  let definition: any;
+  exported.apply({ slots, ...(withConversation ? {
+    inject: (services: string[], callback: (scope: unknown) => void) => {
+      assert.equal(services.join(','), 'uiConversation');
+      callback({ slots, uiConversation: { events: { register: (entry: unknown) => {
+        definition = entry;
+        return () => { definition = undefined; };
+      } } } });
+    },
+  } : {}) });
   function render(): Element {
     cursor = 0;
     const tree = registrations[0]!.component() as Element;
     while (effects.length) { const dispose = effects.shift()!(); if (dispose) cleanup.push(dispose); }
     return tree;
   }
-  return { exported, registrations, disposers, calls, state, render, cleanup, timers,
+  return { exported, registrations, disposers, calls, state, render, cleanup, timers, definition: () => definition,
     remount: () => { cleanup.splice(0).forEach(dispose => dispose()); for (const setup of setups) { const dispose = setup(); if (dispose) cleanup.push(dispose); } },
     tick: () => { for (const callback of timers.values()) callback(); }, disposed: () => disposed };
 }
@@ -799,6 +809,49 @@ test('unmounted account mutation cannot update state', async () => {
   const app = mounted([{value:payload()}, {value:withQuota({status:'ok', remaining:999}), wait}]); app.render(); await settle();
   button(accountRow(app.render()), '刷新').props.onClick(); app.cleanup.forEach(dispose => dispose());
   const before = JSON.stringify(app.state); release(); await settle(); assert.equal(JSON.stringify(app.state), before); assert.equal(app.calls.length, 4);
+});
+
+test('CodeBuddy progress row opens on marked live reasoning and retires when the answer commits', () => {
+  const app = harness([], true);
+  const definition = app.definition();
+  const renderer = app.registrations.find(entry => entry.options.name === 'conversation.chat.node');
+  assert.equal(renderer?.options.key, definition.kind);
+  const marker = { type: 'block-start', blockType: 'reasoning', codebuddyProgress: true };
+  const live = (seq: number, chunk: object, attemptId = 'session:1') => ({
+    type: 'assistant/live-chunk', seq, data: { turn: 1, step: 2, attemptId, chunk },
+  });
+  const start = live(3.5, marker);
+  assert.equal(definition.match['assistant/live-chunk'](live(3.5, {type: 'block-start', blockType: 'reasoning'})), null);
+  const identity = definition.match['assistant/live-chunk'](start);
+  assert.equal(identity.role, 'start');
+  assert.equal(identity.id, '1:2');
+  const location = { kind: 'step', turn: { status: 'open' }, step: { status: 'open' } };
+  const context = { key: 'progress-1', id: identity.id, start: { event: start, location },
+    state: definition.start(undefined, { event: start }), current: new Map() };
+  assert.equal(definition.buildViewNode(context), null);
+  for (const event of [live(3.6, {type: 'reasoning-delta', text: '检查文件'}),
+    live(3.7, {type: 'reasoning-delta', text: '\n[CodeBuddy 完成: Read]'}),
+    live(3.8, {type: 'reasoning-delta', text: '其他尝试'}, 'session:2')]) {
+    context.state = definition.update(context, { event });
+  }
+  const node = definition.buildViewNode(context);
+  assert.equal(node.visibility, 'visible');
+  assert.equal(node.groupTree, 'process');
+  const row = renderer!.component({ node }) as Element;
+  assert.equal(row.type, 'details');
+  assert.equal(row.props.open, true);
+  assert.match(content(row), /CodeBuddy 思考.*检查文件\s+\[CodeBuddy 完成: Read\]/s);
+  assert.doesNotMatch(content(row), /其他尝试/);
+  context.current.set('chat', node);
+  const result = { type: 'assistant/message', seq: 4, data: { turn: 1, step: 2, stream: [{ chunk: marker }] } };
+  assert.equal(definition.match['assistant/message'](result).role, 'update');
+  context.state = definition.update(context, { event: result });
+  const hidden = definition.buildViewNode(context);
+  assert.equal(hidden.visibility, 'hidden');
+  assert.equal(hidden.data.text, '');
+  app.disposers.forEach(dispose => dispose());
+  assert.equal(app.definition(), undefined);
+  assert.equal(app.disposed(), 4);
 });
 
 test('client has no unsafe HTML, persistence, logging or direct DOM access and clears polling', async () => {

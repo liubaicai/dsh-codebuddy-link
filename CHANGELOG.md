@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.0
+
+- Add an expanded CodeBuddy reasoning preview to supported DSH chat views. It remains available during native tool execution and closes when the final answer is committed. Saved reasoning stays in the original transcript.
+
 ## 0.3.33
 
 - Fix the Windows ACP disconnection test so it exercises an actual pipe closure. Includes the configurable inactivity reminder introduced in 0.3.32.
